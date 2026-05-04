@@ -6,13 +6,15 @@ WASAPI デバイスのみを使用することで HostAPI 不一致エラー
 (PaErrorCode -9993 paBadIODeviceCombination) を回避します。
 
 技術仕様:
-  - サンプルレート : 48000 Hz（Discord / WebRTC 標準）
-  - チャンネル     : 1ch（モノラル）
-  - ブロックサイズ : 512 サンプル ≒ 10ms
+  - サンプルレート : デバイスのネイティブレートを自動検出（48000 / 96000 等）
+  - チャンネル     : 入力1ch（モノラル）→ 出力チャンネル数に自動変換
+  - ブロックサイズ : 512 サンプル
   - 内部フォーマット: float32
   - HostAPI       : WASAPI に統一（MME / DirectSound は除外）
+  - モニター       : 入出力のサンプルレート差を _SplitStream で吸収
 """
 
+import queue as _queue_mod
 import threading
 from typing import Optional
 
@@ -58,6 +60,28 @@ def _find_wasapi(name: str, is_input: bool) -> Optional[int]:
         if d["hostapi"] == wi and d[ch_key] > 0 and lower in d["name"].lower():
             return i
     return None
+
+
+def _device_samplerate(idx: Optional[int]) -> int:
+    """デバイスのデフォルトサンプルレートを返す。取得できなければ 48000。"""
+    if idx is None:
+        return SAMPLERATE
+    try:
+        sr = int(sd.query_devices(idx)["default_samplerate"])
+        return sr if sr > 0 else SAMPLERATE
+    except Exception:
+        return SAMPLERATE
+
+
+def _device_out_channels(idx: Optional[int]) -> int:
+    """出力デバイスのチャンネル数（1 または 2）を返す。"""
+    if idx is None:
+        return 2
+    try:
+        ch = int(sd.query_devices(idx)["max_output_channels"])
+        return max(1, min(ch, 2))
+    except Exception:
+        return 2
 
 
 # ── デバイス列挙（UI 向け） ────────────────────────────────────────────────────
@@ -179,20 +203,51 @@ class MicPassthrough:
     def _make_stream(
         self, in_idx: Optional[int], out_idx: Optional[int]
     ) -> sd.Stream:
+        out_ch  = _device_out_channels(out_idx)
+        out_sr  = _device_samplerate(out_idx)
+        in_sr   = _device_samplerate(in_idx)
+
+        # 試行順: (latency, samplerate)
+        # 排他低遅延 → 共有モード（Windowsがリサンプリング）の順でフォールバック
+        _seen: set = set()
+        attempts: list = []
+        for pair in [
+            ("low",  out_sr),
+            ("low",  in_sr),
+            ("high", in_sr),
+            ("high", 48000),
+            ("high", 44100),
+        ]:
+            if pair not in _seen:
+                _seen.add(pair)
+                attempts.append(pair)
+
         def _callback(indata, outdata, frames, time_info, status):
             with self._lock:
                 vol = self._volume
-            np.multiply(indata, vol, out=outdata)
+            # モノ入力 → 出力チャンネル数に合わせてコピー
+            mono = indata[:, 0:1] * vol
+            if outdata.shape[1] == 1:
+                outdata[:] = mono
+            else:
+                outdata[:] = np.repeat(mono, outdata.shape[1], axis=1)
 
-        return sd.Stream(
-            device=(in_idx, out_idx),
-            samplerate=SAMPLERATE,
-            channels=CHANNELS,
-            blocksize=BLOCKSIZE,
-            dtype="float32",
-            callback=_callback,
-            latency="low",
-        )
+        last_exc: Optional[Exception] = None
+        for latency, sr in attempts:
+            try:
+                return sd.Stream(
+                    device=(in_idx, out_idx),
+                    samplerate=sr,
+                    channels=(1, out_ch),
+                    blocksize=BLOCKSIZE,
+                    dtype="float32",
+                    callback=_callback,
+                    latency=latency,
+                )
+            except Exception as e:
+                last_exc = e
+
+        raise last_exc or RuntimeError("ストリームを開けませんでした")
 
     # ----------------------------------------------------------------
     # プロパティ / 解放

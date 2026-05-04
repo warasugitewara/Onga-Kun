@@ -164,6 +164,7 @@ class AudioPlayer:
         vol = volume if volume is not None else self._volume
 
         def _run():
+            import time
             media = self._instance.media_new(file_path)
             player = self._instance.media_player_new()
             player.set_media(media)
@@ -172,20 +173,33 @@ class AudioPlayer:
                 self._apply_device(player, self._output_device)
 
             with self._effect_lock:
-                # 終了済みプレイヤーをGC
-                self._effect_players = [
-                    p for p in self._effect_players
-                    if p.get_state() not in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped)
-                ]
+                # 終了済みプレイヤーをGC（解放済みオブジェクトに触らないよう try/except）
+                alive = []
+                for p in self._effect_players:
+                    try:
+                        if p.get_state() not in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+                            alive.append(p)
+                    except Exception:
+                        pass
+                self._effect_players = alive
                 self._effect_players.append(player)
 
             player.play()
 
             # 再生終了を待機してから解放
-            import time
-            while player.get_state() not in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+            # ※ stop_all_effects() は stop() のみ呼ぶ（release はここで行う）
+            while True:
+                try:
+                    state = player.get_state()
+                except Exception:
+                    break
+                if state in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+                    break
                 time.sleep(0.05)
-            player.release()
+            try:
+                player.release()
+            except Exception:
+                pass
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -196,7 +210,7 @@ class AudioPlayer:
             for player in self._effect_players:
                 try:
                     player.stop()
-                    player.release()
+                    # release() は _run スレッドに委ねる（二重解放によるアクセス違反を防ぐ）
                 except Exception:
                     pass
             self._effect_players.clear()
