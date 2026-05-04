@@ -3,9 +3,27 @@ audio_player.py
 オーディオ制御モジュール。python-vlc をラップして UI から扱いやすいクラスを提供します。
 """
 
+import os
 import vlc
 import threading
 from typing import Optional
+
+
+def _find_vlc_dir() -> Optional[str]:
+    """VLC のインストールディレクトリを返す（なければ None）。"""
+    for path in [
+        r"C:\Program Files\VideoLAN\VLC",
+        r"C:\Program Files (x86)\VideoLAN\VLC",
+    ]:
+        if os.path.exists(os.path.join(path, "libvlc.dll")):
+            return path
+    return None
+
+
+# VLC DLL を PATH に追加（python-vlc が libvlc.dll を見つけられるようにする）
+_vlc_dir = _find_vlc_dir()
+if _vlc_dir and _vlc_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _vlc_dir + os.pathsep + os.environ.get("PATH", "")
 
 
 class AudioPlayer:
@@ -14,12 +32,15 @@ class AudioPlayer:
     効果音の並列再生（サウンドボード機能）を担うクラス。
     """
 
+    # VLC の Windows 向け WASAPI/MMDevice モジュール名（優先順）
+    _WIN_AUDIO_MODULES = (b"mmdevice", b"wasapi", b"directsound", b"waveout")
+
     def __init__(self):
-        # VLC インスタンス（--quiet でログ抑制、Windows WASAPI を優先使用）
-        self._instance = vlc.Instance("--quiet", "--aout=directsound")
+        # VLC インスタンス（--quiet でログ抑制）
+        self._instance = vlc.Instance("--quiet")
         # メイン音楽用プレイヤー
         self._music_player: Optional[vlc.MediaPlayer] = None
-        # 出力デバイス名（空文字 = デフォルトデバイス）
+        # 選択中の出力デバイス description（空文字 = デフォルト）
         self._output_device: str = ""
         # 音量 0-100
         self._volume: int = 80
@@ -27,34 +48,51 @@ class AudioPlayer:
         self._effect_lock = threading.Lock()
         # 再生中の効果音プレイヤーを追跡するリスト（自動GC付き）
         self._effect_players: list[vlc.MediaPlayer] = []
+        # description → (module_bytes, device_id_bytes) のキャッシュ
+        self._device_map: dict[str, tuple[bytes, bytes]] = {}
 
     # ---------------------------------------------------------------
     # デバイス関連
     # ---------------------------------------------------------------
 
+    def _build_device_map(self) -> None:
+        """
+        利用可能な全出力デバイスを列挙して self._device_map を更新します。
+        VLC の AudioOutputDevice はリンクリスト構造のため .contents で辿ります。
+        """
+        self._device_map = {}
+        for mod in self._WIN_AUDIO_MODULES:
+            ptr = self._instance.audio_output_device_list_get(mod)
+            if not ptr:
+                continue
+            node = ptr
+            while node and node.contents:
+                raw_dev  = node.contents.device       # bytes | None
+                raw_desc = node.contents.description  # bytes | None
+                if raw_dev and raw_desc:
+                    desc = raw_desc.decode("utf-8", errors="replace")
+                    self._device_map[desc] = (mod, raw_dev)
+                nxt = node.contents.next
+                if not nxt:
+                    break
+                node = nxt
+            # libvlc_audio_output_device_list_release はバインディング未対応のため
+            # python-vlc の vlc.AudioOutputDevice.__del__ に任せる
+            break  # 最初に成功したモジュールだけ使えば十分
+
     def get_audio_devices(self) -> list[str]:
         """
         VLC が認識しているオーディオ出力デバイスの一覧を返します。
         VB-Cable など仮想デバイスも含みます。
+        先頭要素は常に「デフォルト」（空文字キー）です。
         """
-        # AudioOutputDeviceEnum は VLC のモジュール出力ではなくデバイスを返す
-        # mlist はリンクリスト形式なので Python リストに変換します
-        devices: list[str] = []
-        try:
-            mods = self._instance.audio_output_enumerate_devices()
-            if mods is None:
-                return ["default"]
-            for mod in mods:
-                for dev in mod.get("devices", []):
-                    name = dev.get("description", "")
-                    if name:
-                        devices.append(name)
-        except Exception:
-            pass
-
-        if not devices:
-            devices.append("default")
-        return devices
+        self._build_device_map()
+        names = list(self._device_map.keys())
+        # 先頭に「デフォルト（システム規定）」を挿入
+        default_label = "デフォルト（システム規定）"
+        if default_label not in names:
+            names.insert(0, default_label)
+        return names
 
     def set_output_device(self, device_description: str) -> None:
         """
@@ -167,23 +205,26 @@ class AudioPlayer:
     def _apply_device(self, player: vlc.MediaPlayer, device_description: str) -> None:
         """
         指定プレイヤーの出力先デバイスを変更します。
-        VLC の audio_output_device_set は module 名 + device_id を必要とします。
-        description から device_id へのマッピングをここで行います。
+        デフォルト選択時や未登録デバイス名は何もしない（VLC 既定デバイスを使用）。
         """
+        if not device_description or device_description == "デフォルト（システム規定）":
+            return
+        if device_description not in self._device_map:
+            # キャッシュが古い可能性があるので再取得
+            self._build_device_map()
+        entry = self._device_map.get(device_description)
+        if entry is None:
+            return
+        mod_bytes, dev_id_bytes = entry
         try:
-            mods = self._instance.audio_output_enumerate_devices()
-            if mods is None:
-                return
-            for mod in mods:
-                for dev in mod.get("devices", []):
-                    if dev.get("description", "") == device_description:
-                        player.audio_output_device_set(
-                            mod.get("name", ""),
-                            dev.get("device", "")
-                        )
-                        return
-        except Exception:
-            pass
+            # audio_output_device_set(module, device_id)
+            # module は str か bytes どちらでも受け付ける
+            player.audio_output_device_set(
+                mod_bytes.decode("ascii"),
+                dev_id_bytes.decode("ascii"),
+            )
+        except Exception as e:
+            print(f"[警告] デバイス設定失敗 ({device_description}): {e}")
 
     def release(self) -> None:
         """アプリ終了時にすべてのリソースを解放します。main.py から呼び出してください。"""

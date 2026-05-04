@@ -48,13 +48,25 @@ def _next_id(settings: dict) -> int:
 
 # ── ホットキー管理 ─────────────────────────────────────────────────────────
 
+# 登録済みホットキーハンドルを保持するリスト（unhook_all_hotkeys の代替）
+_hotkey_handles: list = []
+
+
 def register_hotkeys(settings: dict, player: AudioPlayer) -> None:
     """
     soundboard エントリのホットキーを一括登録します。
     呼ぶ前に既存フックをすべて解除するので、設定変更後に再呼び出しするだけでOKです。
     ゲームなど他ウィンドウが前面でも検知できます（管理者権限推奨）。
     """
-    keyboard.unhook_all_hotkeys()
+    global _hotkey_handles
+    # 既存のホットキーを個別に解除（unhook_all_hotkeys は Python 3.11+ で不安定）
+    for handle in _hotkey_handles:
+        try:
+            keyboard.remove_hotkey(handle)
+        except Exception:
+            pass
+    _hotkey_handles.clear()
+
     count = 0
     for item in settings.get("soundboard", []):
         hotkey = item.get("hotkey", "").strip()
@@ -62,7 +74,8 @@ def register_hotkeys(settings: dict, player: AudioPlayer) -> None:
         if not hotkey or not file or not os.path.exists(file):
             continue
         # suppress=False → 他アプリへのキー入力はブロックしない
-        keyboard.add_hotkey(hotkey, lambda f=file: player.play_effect(f), suppress=False)
+        handle = keyboard.add_hotkey(hotkey, lambda f=file: player.play_effect(f), suppress=False)
+        _hotkey_handles.append(handle)
         count += 1
     print(f"[ホットキー] {count} 件登録")
 
@@ -218,7 +231,11 @@ def main():
     try:
         app.mainloop()
     finally:
-        keyboard.unhook_all()
+        for handle in _hotkey_handles:
+            try:
+                keyboard.remove_hotkey(handle)
+            except Exception:
+                pass
         player.release()
         save_settings(settings)
         print("[終了] 設定を保存しました")
