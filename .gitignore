@@ -1,0 +1,92 @@
+# ===========================
+#  Python / 仮想環境
+# ===========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.venv/
+venv/
+ENV/
+
+# ===========================
+#  ビルド成果物
+# ===========================
+dist/
+build/
+*.exe
+*.msi
+installer/Output/
+
+# PyInstaller ワーク
+*.manifest
+*.spec.bak
+
+# ===========================
+#  ユーザー固有の設定・ログ
+# ===========================
+# settings.json は個人のデバイス設定が含まれるため除外
+# → settings.example.json を参照してください
+settings.json
+*.log
+*.pid
+
+# ===========================
+#  AI / エージェント関連
+# ===========================
+# Copilot / GitHub Copilot Workspace
+.copilot/
+.copilot-session/
+Agent.md
+AGENTS.md
+AGENT.md
+copilot-workspace*.md
+*.copilot-session
+
+# GitHub Copilot CLI セッション
+session-state/
+
+# Cursor / Windsurf / Cline 等
+.cursor/
+.cline/
+.aider*
+*.aider
+
+# ===========================
+#  OS・エディタ
+# ===========================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS（念のため）
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains
+.idea/
+*.iml
+*.iws
+
+# ===========================
+#  その他
+# ===========================
+*.bak
+*.swp
+*.tmp
+temp/
+tmp/
+.env
+.env.*
+secrets.*

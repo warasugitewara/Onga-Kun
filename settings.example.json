@@ -1,0 +1,30 @@
+{
+  "output_device": "",
+  "volume": 80,
+  "soundboard": [
+    {
+      "id": 1,
+      "name": "効果音 1",
+      "file": "",
+      "hotkey": "F1"
+    },
+    {
+      "id": 2,
+      "name": "効果音 2",
+      "file": "",
+      "hotkey": "F2"
+    },
+    {
+      "id": 3,
+      "name": "効果音 3",
+      "file": "",
+      "hotkey": "F3"
+    },
+    {
+      "id": 4,
+      "name": "効果音 4",
+      "file": "",
+      "hotkey": "F4"
+    }
+  ]
+}
