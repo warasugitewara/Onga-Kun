@@ -40,4 +40,5 @@ MIT
 
 - **warasugitewara** (https://github.com/warasugitewara) — 開発
 - **sushi-m4a** (https://github.com/sushi-m4a) — アイデア・企画協力  
-  Contact: chaco831miku@gmail.com
+### Contact
+- あくまで身内用なのでお答えできない場合が多いですが、連絡はDiscordで取れます。
