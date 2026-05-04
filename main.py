@@ -12,7 +12,7 @@ import customtkinter as ctk
 import keyboard
 
 from audio_player import AudioPlayer
-from mic_passthrough import MicPassthrough, get_input_device_names, find_input_index, find_output_index
+from mic_passthrough import MicPassthrough, get_input_device_names
 from ui import App
 from updater import check_latest, download_and_launch
 from version import VERSION
@@ -235,10 +235,8 @@ def main():
         if enabled:
             mic_in_name  = settings.get("mic_input_device", "")
             vlc_out_name = settings.get("output_device", "")
-            in_idx  = find_input_index(mic_in_name) if mic_in_name else None
-            out_idx = find_output_index(vlc_out_name)
             try:
-                mic.start(in_idx, out_idx)
+                mic.start(mic_in_name, vlc_out_name)
             except Exception as e:
                 print(f"[エラー] マイクパス送信開始失敗: {e}")
                 app.after(0, lambda: app.set_mic_active(False))
@@ -248,16 +246,39 @@ def main():
     def on_mic_device(device_name: str):
         settings["mic_input_device"] = device_name
         save_settings(settings)
-        # 現在パス送信中ならデバイスを切り替えて再起動
+        # パス送信中ならデバイスを切り替えて再起動
         if mic.active:
-            on_mic_toggle(False)
-            on_mic_toggle(True)
-            app.set_mic_active(True)
+            vlc_out_name = settings.get("output_device", "")
+            try:
+                mic.start(device_name, vlc_out_name)
+                app.set_mic_active(True)
+            except Exception as e:
+                print(f"[エラー] マイクパス送信再起動失敗: {e}")
+                app.after(0, lambda: app.set_mic_active(False))
+        # モニター中も再起動
+        if mic.monitor_active:
+            try:
+                mic.start_monitor(device_name)
+                app.set_mic_monitor_active(True)
+            except Exception as e:
+                print(f"[エラー] モニター再起動失敗: {e}")
+                app.after(0, lambda: app.set_mic_monitor_active(False))
 
     def on_mic_volume(volume: int):
         settings["mic_volume"] = volume
         mic.set_volume(volume)
         save_settings(settings)
+
+    def on_mic_monitor(enabled: bool):
+        if enabled:
+            mic_in_name = settings.get("mic_input_device", "")
+            try:
+                mic.start_monitor(mic_in_name)
+            except Exception as e:
+                print(f"[エラー] モニタリング開始失敗: {e}")
+                app.after(0, lambda: app.set_mic_monitor_active(False))
+        else:
+            mic.stop_monitor()
 
     # ── コールバック注入 ────────────────────────────────────────────────────
     app.set_callbacks(
@@ -274,6 +295,7 @@ def main():
         on_mic_toggle=on_mic_toggle,
         on_mic_device=on_mic_device,
         on_mic_volume=on_mic_volume,
+        on_mic_monitor=on_mic_monitor,
     )
 
     # ── メインループ ────────────────────────────────────────────────────────

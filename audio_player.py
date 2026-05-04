@@ -194,8 +194,11 @@ class AudioPlayer:
         """現在再生中の効果音をすべて停止します。"""
         with self._effect_lock:
             for player in self._effect_players:
-                player.stop()
-                player.release()
+                try:
+                    player.stop()
+                    player.release()
+                except Exception:
+                    pass
             self._effect_players.clear()
 
     # ---------------------------------------------------------------
@@ -228,6 +231,15 @@ class AudioPlayer:
 
     def release(self) -> None:
         """アプリ終了時にすべてのリソースを解放します。main.py から呼び出してください。"""
-        self.stop_music()
-        self.stop_all_effects()
-        self._instance.release()
+        try:
+            self.stop_music()
+        except Exception:
+            pass
+        try:
+            self.stop_all_effects()
+        except Exception:
+            pass
+        try:
+            self._instance.release()
+        except Exception:
+            pass

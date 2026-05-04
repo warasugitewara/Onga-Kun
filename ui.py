@@ -208,13 +208,15 @@ class App(ctk.CTk):
         self._cb_delete:     Optional[Callable[[int], None]] = None
         self._cb_add:        Optional[Callable[[dict], None]] = None
         # マイク パス送信
-        self._cb_mic_toggle: Optional[Callable[[bool], None]] = None
-        self._cb_mic_device: Optional[Callable[[str], None]]  = None
-        self._cb_mic_volume: Optional[Callable[[int], None]]  = None
+        self._cb_mic_toggle:  Optional[Callable[[bool], None]] = None
+        self._cb_mic_device:  Optional[Callable[[str], None]]  = None
+        self._cb_mic_volume:  Optional[Callable[[int], None]]  = None
+        self._cb_mic_monitor: Optional[Callable[[bool], None]] = None
 
         self._music_file = ""
         self._all_items: list[dict] = []
-        self._mic_active = False
+        self._mic_active         = False
+        self._mic_monitor_active = False
 
         self._build()
 
@@ -296,13 +298,21 @@ class App(ctk.CTk):
         strip.pack(fill="x", side="bottom")
         strip.pack_propagate(False)
 
-        # トグルボタン
+        # パス送信 ON/OFF トグル
         self.mic_btn = ctk.CTkButton(
             strip, text="🎤  OFF", width=90, height=30,
             fg_color=BORDER, hover_color="#3e4160",
             command=self._on_mic_toggle,
         )
-        self.mic_btn.pack(side="left", padx=(14, 8))
+        self.mic_btn.pack(side="left", padx=(14, 6))
+
+        # モニター（自分の声を手元で確認）トグル
+        self.mic_mon_btn = ctk.CTkButton(
+            strip, text="🎧  OFF", width=84, height=30,
+            fg_color=BORDER, hover_color="#3e4160",
+            command=self._on_mic_monitor,
+        )
+        self.mic_mon_btn.pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(
             strip, text="マイク入力:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
@@ -376,20 +386,22 @@ class App(ctk.CTk):
         on_volume, on_device, on_effect,
         on_edit_sound, on_delete_sound, on_add_sound,
         on_mic_toggle=None, on_mic_device=None, on_mic_volume=None,
+        on_mic_monitor=None,
     ):
-        self._cb_play       = on_play
-        self._cb_pause      = on_pause
-        self._cb_stop       = on_stop
-        self._cb_stop_all   = on_stop_all
-        self._cb_volume     = on_volume
-        self._cb_device     = on_device
-        self._cb_effect     = on_effect
-        self._cb_edit       = on_edit_sound
-        self._cb_delete     = on_delete_sound
-        self._cb_add        = on_add_sound
-        self._cb_mic_toggle = on_mic_toggle
-        self._cb_mic_device = on_mic_device
-        self._cb_mic_volume = on_mic_volume
+        self._cb_play         = on_play
+        self._cb_pause        = on_pause
+        self._cb_stop         = on_stop
+        self._cb_stop_all     = on_stop_all
+        self._cb_volume       = on_volume
+        self._cb_device       = on_device
+        self._cb_effect       = on_effect
+        self._cb_edit         = on_edit_sound
+        self._cb_delete       = on_delete_sound
+        self._cb_add          = on_add_sound
+        self._cb_mic_toggle   = on_mic_toggle
+        self._cb_mic_device   = on_mic_device
+        self._cb_mic_volume   = on_mic_volume
+        self._cb_mic_monitor  = on_mic_monitor
 
     def set_devices(self, devices: list[str], current: str = ""):
         self.device_cb.configure(values=devices)
@@ -415,6 +427,14 @@ class App(ctk.CTk):
             self.mic_btn.configure(text="🎤  ON", fg_color=GREEN_BTN, hover_color=GREEN_HOVER)
         else:
             self.mic_btn.configure(text="🎤  OFF", fg_color=BORDER, hover_color="#3e4160")
+
+    def set_mic_monitor_active(self, active: bool):
+        """モニターボタンの表示状態を更新します（外部から呼ぶ用）。"""
+        self._mic_monitor_active = active
+        if active:
+            self.mic_mon_btn.configure(text="🎧  ON", fg_color="#1a6b8a", hover_color="#1e88b0")
+        else:
+            self.mic_mon_btn.configure(text="🎧  OFF", fg_color=BORDER, hover_color="#3e4160")
 
     def set_mic_volume(self, volume: int):
         self.mic_vol_slider.set(volume)
@@ -491,6 +511,12 @@ class App(ctk.CTk):
         self.set_mic_active(new_state)
         if self._cb_mic_toggle:
             self._cb_mic_toggle(new_state)
+
+    def _on_mic_monitor(self):
+        new_state = not self._mic_monitor_active
+        self.set_mic_monitor_active(new_state)
+        if self._cb_mic_monitor:
+            self._cb_mic_monitor(new_state)
 
     def _on_mic_device(self, selected: str):
         if self._cb_mic_device:
