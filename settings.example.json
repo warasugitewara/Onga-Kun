@@ -1,6 +1,8 @@
 {
   "output_device": "",
   "volume": 80,
+  "mic_input_device": "",
+  "mic_volume": 80,
   "soundboard": [
     {
       "id": 1,

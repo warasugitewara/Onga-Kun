@@ -197,19 +197,24 @@ class App(ctk.CTk):
         self.configure(fg_color=BG)
 
         # コールバック格納（main.py から set_callbacks() で注入）
-        self._cb_play:     Optional[Callable[[str], None]] = None
-        self._cb_pause:    Optional[Callable[[], None]]    = None
-        self._cb_stop:     Optional[Callable[[], None]]    = None
-        self._cb_stop_all: Optional[Callable[[], None]]    = None
-        self._cb_volume:   Optional[Callable[[int], None]] = None
-        self._cb_device:   Optional[Callable[[str], None]] = None
-        self._cb_effect:   Optional[Callable[[int], None]] = None
-        self._cb_edit:     Optional[Callable[[dict], None]] = None
-        self._cb_delete:   Optional[Callable[[int], None]] = None
-        self._cb_add:      Optional[Callable[[dict], None]] = None
+        self._cb_play:       Optional[Callable[[str], None]] = None
+        self._cb_pause:      Optional[Callable[[], None]]    = None
+        self._cb_stop:       Optional[Callable[[], None]]    = None
+        self._cb_stop_all:   Optional[Callable[[], None]]    = None
+        self._cb_volume:     Optional[Callable[[int], None]] = None
+        self._cb_device:     Optional[Callable[[str], None]] = None
+        self._cb_effect:     Optional[Callable[[int], None]] = None
+        self._cb_edit:       Optional[Callable[[dict], None]] = None
+        self._cb_delete:     Optional[Callable[[int], None]] = None
+        self._cb_add:        Optional[Callable[[dict], None]] = None
+        # マイク パス送信
+        self._cb_mic_toggle: Optional[Callable[[bool], None]] = None
+        self._cb_mic_device: Optional[Callable[[str], None]]  = None
+        self._cb_mic_volume: Optional[Callable[[int], None]]  = None
 
         self._music_file = ""
         self._all_items: list[dict] = []
+        self._mic_active = False
 
         self._build()
 
@@ -221,6 +226,8 @@ class App(ctk.CTk):
         self._build_main()
         ctk.CTkFrame(self, height=1, fg_color=BORDER).pack(fill="x", side="bottom")
         self._build_player_strip()
+        ctk.CTkFrame(self, height=1, fg_color=BORDER).pack(fill="x", side="bottom")
+        self._build_mic_strip()
 
     def _build_header(self):
         header = ctk.CTkFrame(self, fg_color=TOOLBAR, height=54, corner_radius=0)
@@ -283,6 +290,42 @@ class App(ctk.CTk):
         self.grid_frame = ctk.CTkScrollableFrame(self, fg_color=BG)
         self.grid_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
+    def _build_mic_strip(self):
+        """マイク パス送信コントロールストリップ（BGM ストリップの上）"""
+        strip = ctk.CTkFrame(self, fg_color=TOOLBAR, height=44, corner_radius=0)
+        strip.pack(fill="x", side="bottom")
+        strip.pack_propagate(False)
+
+        # トグルボタン
+        self.mic_btn = ctk.CTkButton(
+            strip, text="🎤  OFF", width=90, height=30,
+            fg_color=BORDER, hover_color="#3e4160",
+            command=self._on_mic_toggle,
+        )
+        self.mic_btn.pack(side="left", padx=(14, 8))
+
+        ctk.CTkLabel(
+            strip, text="マイク入力:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
+        ).pack(side="left", padx=(0, 6))
+
+        self.mic_input_cb = ctk.CTkComboBox(
+            strip, width=210, values=["読み込み中…"], command=self._on_mic_device
+        )
+        self.mic_input_cb.pack(side="left", padx=(0, 14))
+
+        ctk.CTkLabel(strip, text="🎚️", text_color=TEXT_SUB).pack(side="left", padx=(0, 4))
+
+        self.mic_vol_slider = ctk.CTkSlider(
+            strip, from_=0, to=100, width=90, command=self._on_mic_volume
+        )
+        self.mic_vol_slider.set(80)
+        self.mic_vol_slider.pack(side="left", padx=(0, 4))
+
+        self.mic_vol_label = ctk.CTkLabel(
+            strip, text="80", width=28, text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
+        )
+        self.mic_vol_label.pack(side="left")
+
     def _build_player_strip(self):
         """下部の BGM プレイヤーストリップ"""
         strip = ctk.CTkFrame(self, fg_color=SURFACE, height=52, corner_radius=0)
@@ -332,17 +375,21 @@ class App(ctk.CTk):
         on_play, on_pause, on_stop, on_stop_all,
         on_volume, on_device, on_effect,
         on_edit_sound, on_delete_sound, on_add_sound,
+        on_mic_toggle=None, on_mic_device=None, on_mic_volume=None,
     ):
-        self._cb_play     = on_play
-        self._cb_pause    = on_pause
-        self._cb_stop     = on_stop
-        self._cb_stop_all = on_stop_all
-        self._cb_volume   = on_volume
-        self._cb_device   = on_device
-        self._cb_effect   = on_effect
-        self._cb_edit     = on_edit_sound
-        self._cb_delete   = on_delete_sound
-        self._cb_add      = on_add_sound
+        self._cb_play       = on_play
+        self._cb_pause      = on_pause
+        self._cb_stop       = on_stop
+        self._cb_stop_all   = on_stop_all
+        self._cb_volume     = on_volume
+        self._cb_device     = on_device
+        self._cb_effect     = on_effect
+        self._cb_edit       = on_edit_sound
+        self._cb_delete     = on_delete_sound
+        self._cb_add        = on_add_sound
+        self._cb_mic_toggle = on_mic_toggle
+        self._cb_mic_device = on_mic_device
+        self._cb_mic_volume = on_mic_volume
 
     def set_devices(self, devices: list[str], current: str = ""):
         self.device_cb.configure(values=devices)
@@ -353,6 +400,25 @@ class App(ctk.CTk):
     def set_volume(self, volume: int):
         self.vol_slider.set(volume)
         self.vol_label.configure(text=str(volume))
+
+    def set_mic_devices(self, devices: list[str], current: str = ""):
+        """マイク入力デバイスのドロップダウンを更新します。"""
+        self.mic_input_cb.configure(values=devices if devices else ["(デバイスなし)"])
+        target = current if (current and current in devices) else (devices[0] if devices else "")
+        if target:
+            self.mic_input_cb.set(target)
+
+    def set_mic_active(self, active: bool):
+        """パス送信ボタンの表示状態を更新します（外部から呼ぶ用）。"""
+        self._mic_active = active
+        if active:
+            self.mic_btn.configure(text="🎤  ON", fg_color=GREEN_BTN, hover_color=GREEN_HOVER)
+        else:
+            self.mic_btn.configure(text="🎤  OFF", fg_color=BORDER, hover_color="#3e4160")
+
+    def set_mic_volume(self, volume: int):
+        self.mic_vol_slider.set(volume)
+        self.mic_vol_label.configure(text=str(volume))
 
     def set_soundboard(self, items: list[dict]):
         self._all_items = list(items)
@@ -417,6 +483,24 @@ class App(ctk.CTk):
         q = self.search_entry.get().strip().lower()
         filtered = [it for it in self._all_items if q in it["name"].lower()] if q else self._all_items
         self._render_grid(filtered)
+
+    # ── マイク パス送信コントロール ────────────────────────────────────────────
+
+    def _on_mic_toggle(self):
+        new_state = not self._mic_active
+        self.set_mic_active(new_state)
+        if self._cb_mic_toggle:
+            self._cb_mic_toggle(new_state)
+
+    def _on_mic_device(self, selected: str):
+        if self._cb_mic_device:
+            self._cb_mic_device(selected)
+
+    def _on_mic_volume(self, val: float):
+        v = int(val)
+        self.mic_vol_label.configure(text=str(v))
+        if self._cb_mic_volume:
+            self._cb_mic_volume(v)
 
     def _on_volume(self, val: float):
         v = int(val)

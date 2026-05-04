@@ -12,6 +12,7 @@ import customtkinter as ctk
 import keyboard
 
 from audio_player import AudioPlayer
+from mic_passthrough import MicPassthrough, get_input_device_names, find_input_index, find_output_index
 from ui import App
 from updater import check_latest, download_and_launch
 from version import VERSION
@@ -22,7 +23,11 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 # ── 設定ファイルの読み書き ──────────────────────────────────────────────────
 
 def load_settings() -> dict:
-    default: dict = {"output_device": "", "volume": 80, "soundboard": []}
+    default: dict = {
+        "output_device": "", "volume": 80,
+        "mic_input_device": "", "mic_volume": 80,
+        "soundboard": [],
+    }
     if not os.path.exists(SETTINGS_PATH):
         return default
     try:
@@ -85,18 +90,29 @@ def register_hotkeys(settings: dict, player: AudioPlayer) -> None:
 def main():
     settings = load_settings()
     player   = AudioPlayer()
+    mic      = MicPassthrough()
     app      = App()
 
-    # VLC のデバイス列挙は少し重いのでバックグラウンドで実行
+    # VLC デバイス列挙はバックグラウンドで実行
     def _load_devices():
         devices = player.get_audio_devices()
         app.after(0, lambda: app.set_devices(devices, settings.get("output_device", "")))
 
     threading.Thread(target=_load_devices, daemon=True).start()
 
+    # マイク入力デバイス列挙もバックグラウンドで実行
+    def _load_mic_devices():
+        mic_devs = get_input_device_names()
+        current  = settings.get("mic_input_device", "")
+        app.after(0, lambda: app.set_mic_devices(mic_devs, current))
+
+    threading.Thread(target=_load_mic_devices, daemon=True).start()
+
     # 初期値を UI と音声エンジンに反映
     app.set_volume(settings.get("volume", 80))
     player.set_volume(settings.get("volume", 80))
+    app.set_mic_volume(settings.get("mic_volume", 80))
+    mic.set_volume(settings.get("mic_volume", 80))
     app.set_soundboard(settings.get("soundboard", []))
 
     register_hotkeys(settings, player)
@@ -213,6 +229,36 @@ def main():
         app.add_sound_item(item_data)
         save_settings(settings)
 
+    # ── マイク パス送信コールバック ─────────────────────────────────────────
+
+    def on_mic_toggle(enabled: bool):
+        if enabled:
+            mic_in_name  = settings.get("mic_input_device", "")
+            vlc_out_name = settings.get("output_device", "")
+            in_idx  = find_input_index(mic_in_name) if mic_in_name else None
+            out_idx = find_output_index(vlc_out_name)
+            try:
+                mic.start(in_idx, out_idx)
+            except Exception as e:
+                print(f"[エラー] マイクパス送信開始失敗: {e}")
+                app.after(0, lambda: app.set_mic_active(False))
+        else:
+            mic.stop()
+
+    def on_mic_device(device_name: str):
+        settings["mic_input_device"] = device_name
+        save_settings(settings)
+        # 現在パス送信中ならデバイスを切り替えて再起動
+        if mic.active:
+            on_mic_toggle(False)
+            on_mic_toggle(True)
+            app.set_mic_active(True)
+
+    def on_mic_volume(volume: int):
+        settings["mic_volume"] = volume
+        mic.set_volume(volume)
+        save_settings(settings)
+
     # ── コールバック注入 ────────────────────────────────────────────────────
     app.set_callbacks(
         on_play=on_play,
@@ -225,6 +271,9 @@ def main():
         on_edit_sound=on_edit_sound,
         on_delete_sound=on_delete_sound,
         on_add_sound=on_add_sound,
+        on_mic_toggle=on_mic_toggle,
+        on_mic_device=on_mic_device,
+        on_mic_volume=on_mic_volume,
     )
 
     # ── メインループ ────────────────────────────────────────────────────────
@@ -236,6 +285,7 @@ def main():
                 keyboard.remove_hotkey(handle)
             except Exception:
                 pass
+        mic.release()
         player.release()
         save_settings(settings)
         print("[終了] 設定を保存しました")
