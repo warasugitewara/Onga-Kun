@@ -115,9 +115,10 @@ class AudioPlayer:
         self._music_player = self._instance.media_player_new()
         self._music_player.set_media(media)
         self._music_player.audio_set_volume(self._volume)
-        if self._output_device:
-            self._apply_device(self._music_player, self._output_device)
         self._music_player.play()
+        # audio_output_device_set は play() 後・Playing状態になってから適用しないと無視される
+        if self._output_device:
+            self._apply_device_deferred(self._music_player, self._output_device)
 
     def pause_music(self) -> None:
         """再生中は一時停止、一時停止中は再開します（トグル）。"""
@@ -169,11 +170,8 @@ class AudioPlayer:
             player = self._instance.media_player_new()
             player.set_media(media)
             player.audio_set_volume(vol)
-            if self._output_device:
-                self._apply_device(player, self._output_device)
 
             with self._effect_lock:
-                # 終了済みプレイヤーをGC（解放済みオブジェクトに触らないよう try/except）
                 alive = []
                 for p in self._effect_players:
                     try:
@@ -186,8 +184,18 @@ class AudioPlayer:
 
             player.play()
 
+            # audio_output_device_set は Playing状態になってから適用する（pre-play は無視される）
+            if self._output_device:
+                for _ in range(40):  # 最大 2 秒待機
+                    try:
+                        if player.get_state() == vlc.State.Playing:
+                            self._apply_device(player, self._output_device)
+                            break
+                    except Exception:
+                        break
+                    time.sleep(0.05)
+
             # 再生終了を待機してから解放
-            # ※ stop_all_effects() は stop() のみ呼ぶ（release はここで行う）
             while True:
                 try:
                     state = player.get_state()
@@ -222,26 +230,43 @@ class AudioPlayer:
     def _apply_device(self, player: vlc.MediaPlayer, device_description: str) -> None:
         """
         指定プレイヤーの出力先デバイスを変更します。
-        デフォルト選択時や未登録デバイス名は何もしない（VLC 既定デバイスを使用）。
+        play() 後・Playing状態で呼ぶこと（pre-play設定は VLC に無視される）。
         """
         if not device_description or device_description == "デフォルト（システム規定）":
             return
         if device_description not in self._device_map:
-            # キャッシュが古い可能性があるので再取得
             self._build_device_map()
         entry = self._device_map.get(device_description)
         if entry is None:
+            print(f"[警告] デバイス未検出: '{device_description}'")
             return
         mod_bytes, dev_id_bytes = entry
+        mod_str = mod_bytes.decode("ascii")
+        dev_str = dev_id_bytes.decode("ascii", errors="replace")
         try:
-            # audio_output_device_set(module, device_id)
-            # module は str か bytes どちらでも受け付ける
-            player.audio_output_device_set(
-                mod_bytes.decode("ascii"),
-                dev_id_bytes.decode("ascii"),
-            )
+            player.audio_output_set(mod_str)
+            player.audio_output_device_set(mod_str, dev_str)
+            print(f"[デバイス] → {device_description} ({mod_str})")
         except Exception as e:
             print(f"[警告] デバイス設定失敗 ({device_description}): {e}")
+
+    def _apply_device_deferred(self, player: vlc.MediaPlayer, device_description: str) -> None:
+        """play() 直後に呼ぶ。Playing状態になるまで待ってから _apply_device を実行する。"""
+        import time
+
+        def _wait_and_apply():
+            for _ in range(40):  # 最大 2 秒
+                try:
+                    if player.get_state() == vlc.State.Playing:
+                        self._apply_device(player, device_description)
+                        return
+                except Exception:
+                    return
+                time.sleep(0.05)
+            # タイムアウト時も一応試みる
+            self._apply_device(player, device_description)
+
+        threading.Thread(target=_wait_and_apply, daemon=True).start()
 
     def release(self) -> None:
         """アプリ終了時にすべてのリソースを解放します。main.py から呼び出してください。"""
