@@ -232,7 +232,7 @@ class AudioPlayer:
     def __init__(self):
         self._out_idx:  Optional[int] = None
         self._out_name: str           = ""
-        self._volume:   int           = 80    # 0–100
+        self._volume:   int           = 50    # 0–100
 
         # BGM
         self._bgm_stop  = threading.Event()

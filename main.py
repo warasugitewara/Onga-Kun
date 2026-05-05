@@ -24,7 +24,7 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 
 def load_settings() -> dict:
     default: dict = {
-        "output_device": "", "volume": 80,
+        "output_device": "", "volume": 50,
         "mic_input_device": "", "mic_volume": 80,
         "soundboard": [],
     }
