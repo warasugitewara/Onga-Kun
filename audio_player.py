@@ -163,19 +163,22 @@ def _to_device_format(
 
 
 def _open_output_stream(out_idx, samplerate, channels) -> sd.OutputStream:
-    """低遅延 → 高遅延の順でストリームを開こうとする。"""
-    for latency in ("low", "high"):
-        try:
-            return sd.OutputStream(
-                device=out_idx,
-                samplerate=samplerate,
-                channels=channels,
-                dtype="float32",
-                latency=latency,
-            )
-        except Exception:
-            pass
-    raise RuntimeError(f"出力ストリームを開けませんでした (device={out_idx}, sr={samplerate})")
+    """
+    WASAPI 共有モード (latency="high") でストリームを開く。
+    共有モードは Windows オーディオミキサーを経由するため、
+    システム音量が適用され他アプリと共存できる。
+    排他モード (low) はミキサーをバイパスして爆音になるため使用しない。
+    """
+    try:
+        return sd.OutputStream(
+            device=out_idx,
+            samplerate=samplerate,
+            channels=channels,
+            dtype="float32",
+            latency="high",
+        )
+    except Exception as e:
+        raise RuntimeError(f"出力ストリームを開けませんでした (device={out_idx}, sr={samplerate}): {e}")
 
 
 # ── _EffectPlayer ────────────────────────────────────────────────────────────
