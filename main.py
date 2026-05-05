@@ -96,7 +96,11 @@ def main():
     # VLC デバイス列挙はバックグラウンドで実行
     def _load_devices():
         devices = player.get_audio_devices()
-        app.after(0, lambda: app.set_devices(devices, settings.get("output_device", "")))
+        saved   = settings.get("output_device", "")
+        # ← 保存済みデバイスを player にも反映（これがないと起動後は常にデフォルト出力になる）
+        if saved:
+            player.set_output_device(saved)
+        app.after(0, lambda: app.set_devices(devices, saved))
 
     threading.Thread(target=_load_devices, daemon=True).start()
 
