@@ -5,10 +5,9 @@
 #define MyAppName    "音ガくん"
 #define MyAppNameEn  "onga-kun"
 #define MyAppVersion "1.0.0"
-#define MyAppPublisher "yourname"
-#define MyAppURL     "https://github.com/yourname/onga-kun"
+#define MyAppPublisher "warasugitewara"
+#define MyAppURL     "https://github.com/warasugitewara/Onga-Kun"
 #define MyAppExe     "onga-kun.exe"
-; ↑ バージョンやリポジトリ名はリリース時に変更してください
 
 [Setup]
 ; AppId は変更しないこと（アップデート時の同一アプリ判定に使われます）
@@ -36,7 +35,7 @@ LZMAUseSeparateProcess=yes
 
 ; 見た目
 WizardStyle=modern
-SetupIconFile=..\..\assets\icon.ico  ; ← アイコンがあれば有効化
+; SetupIconFile=..\assets\icon.ico  ; ← icon.ico を assets/ に追加したら有効化
 
 ; 既存バージョンの上書きインストール対応
 CloseApplications=yes
