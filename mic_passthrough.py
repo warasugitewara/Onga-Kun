@@ -177,18 +177,21 @@ class MicPassthrough:
         """
         マイク → WASAPI デフォルト出力（ヘッドホン/スピーカー）へルーティング。
         自分の声が正しく拾えているか確認するためのモニタリング機能です。
+        入出力のサンプルレートが異なっても _SplitStream が吸収します。
         """
         self.stop_monitor()
         in_idx  = _find_wasapi(input_name, True) if input_name else None
         out_idx = _wasapi_default_output()
 
-        self._mon_stream = self._make_stream(in_idx, out_idx)
-        self._mon_stream.start()
+        stream = _SplitStream(in_idx, out_idx, lambda: self._volume)
+        stream.start()
+        self._mon_stream = stream  # type: ignore[assignment]
         self._monitor_active = True
 
     def stop_monitor(self) -> None:
         if self._mon_stream is not None:
             try:
+                # _SplitStream も sd.Stream も stop()/close() を持つ
                 self._mon_stream.stop()
                 self._mon_stream.close()
             except Exception:
@@ -264,3 +267,100 @@ class MicPassthrough:
     def release(self) -> None:
         self.stop()
         self.stop_monitor()
+
+
+# ── _SplitStream ──────────────────────────────────────────────────────────────
+
+class _SplitStream:
+    """
+    入力と出力を別々の sd.InputStream / sd.OutputStream で開くラッパー。
+
+    通常の sd.Stream (duplex) は入出力が同一サンプルレートでないと
+    -9997 (paInvalidSampleRate) が発生する。
+    このクラスは入力側のレートでキャプチャし、queue 経由で出力側へ渡すことで
+    PortAudio のリサンプリングに任せてレート差を吸収する。
+
+    インターフェースは sd.Stream に合わせており stop()/close() で停止できる。
+    """
+
+    _Q_MAXSIZE = 32   # 約 512×32 = 16384 サンプル ≒ 340ms のバッファ
+
+    def __init__(
+        self,
+        in_idx: Optional[int],
+        out_idx: Optional[int],
+        vol_getter,           # callable() -> float (0.0–2.0)
+    ):
+        self._in_idx    = in_idx
+        self._out_idx   = out_idx
+        self._vol_getter = vol_getter
+        self._q: _queue_mod.Queue = _queue_mod.Queue(maxsize=self._Q_MAXSIZE)
+
+        in_sr   = _device_samplerate(in_idx)
+        out_sr  = _device_samplerate(out_idx)
+        out_ch  = _device_out_channels(out_idx)
+
+        def _in_cb(indata, frames, time_info, status):
+            vol  = self._vol_getter()
+            mono = (indata[:, 0:1] * vol).astype("float32")
+            try:
+                self._q.put_nowait(mono)
+            except _queue_mod.Full:
+                pass  # バッファ溢れは無音より安全
+
+        def _out_cb(outdata, frames, time_info, status):
+            try:
+                chunk = self._q.get_nowait()
+            except _queue_mod.Empty:
+                outdata.fill(0)
+                return
+            if out_ch == 1:
+                outdata[:len(chunk)] = chunk
+            else:
+                outdata[:len(chunk)] = np.repeat(chunk, out_ch, axis=1)
+            # chunk がフレーム数より短い場合はゼロ埋め
+            if len(chunk) < frames:
+                outdata[len(chunk):] = 0
+
+        self._in_stream = sd.InputStream(
+            device=in_idx,
+            samplerate=in_sr,
+            channels=1,
+            blocksize=BLOCKSIZE,
+            dtype="float32",
+            callback=_in_cb,
+            latency="low",
+        )
+        self._out_stream = sd.OutputStream(
+            device=out_idx,
+            samplerate=out_sr,
+            channels=out_ch,
+            blocksize=BLOCKSIZE,
+            dtype="float32",
+            callback=_out_cb,
+            latency="low",
+        )
+
+    def start(self) -> None:
+        self._in_stream.start()
+        self._out_stream.start()
+
+    def stop(self) -> None:
+        try:
+            self._in_stream.stop()
+        except Exception:
+            pass
+        try:
+            self._out_stream.stop()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._in_stream.close()
+        except Exception:
+            pass
+        try:
+            self._out_stream.close()
+        except Exception:
+            pass
