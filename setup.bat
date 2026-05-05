@@ -31,19 +31,24 @@ if !PY_MINOR! LSS 11 (
 )
 echo [OK] Python !PY_VER!
 
-:: -- VLC check --
-set VLC_FOUND=0
-if exist "C:\Program Files\VideoLAN\VLC\libvlc.dll"       set VLC_FOUND=1
-if exist "C:\Program Files (x86)\VideoLAN\VLC\libvlc.dll" set VLC_FOUND=1
-
-if !VLC_FOUND!==0 (
+:: -- ffmpeg check / install --
+where ffmpeg >nul 2>&1
+if errorlevel 1 (
     echo.
-    echo [WARN] VLC not found. Please install from https://www.videolan.org/
-    echo        Audio output will not work without VLC.
-    echo.
-    pause
+    echo [INFO] ffmpeg not found. Required for MP4/M4A audio files.
+    set /p INST_FF=Install ffmpeg via winget? [y/N]: 
+    if /i "!INST_FF!"=="y" (
+        winget install --id Gyan.FFmpeg -e --silent
+        if errorlevel 1 (
+            echo [WARN] winget install failed. Install manually: https://ffmpeg.org/download.html
+        ) else (
+            echo [OK] ffmpeg installed
+        )
+    ) else (
+        echo [SKIP] ffmpeg skipped. MP4/M4A files will not play.
+    )
 ) else (
-    echo [OK] VLC found
+    echo [OK] ffmpeg found
 )
 
 :: -- VB-Cable notice --
