@@ -1,275 +1,326 @@
 """
 audio_player.py
-オーディオ制御モジュール。python-vlc をラップして UI から扱いやすいクラスを提供します。
+soundfile + sounddevice ベースのオーディオ制御モジュール。
+
+VLC の audio_output_device_set は play() 前後どちらで呼んでも
+信頼性が低く CABLE Input へのルーティングに失敗するケースがあった。
+sounddevice は WASAPI デバイスインデックスを直接指定でき、
+mic_passthrough.py で実証済みの確実なルーティングが可能。
 """
 
 import os
-import vlc
 import threading
+import time
 from typing import Optional
 
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
 
-def _find_vlc_dir() -> Optional[str]:
-    """VLC のインストールディレクトリを返す（なければ None）。"""
-    for path in [
-        r"C:\Program Files\VideoLAN\VLC",
-        r"C:\Program Files (x86)\VideoLAN\VLC",
-    ]:
-        if os.path.exists(os.path.join(path, "libvlc.dll")):
-            return path
+
+# ── WASAPI ユーティリティ ────────────────────────────────────────────────────
+
+def _wasapi_idx() -> Optional[int]:
+    for i, api in enumerate(sd.query_hostapis()):
+        if "WASAPI" in api["name"]:
+            return i
     return None
 
 
-# VLC DLL を PATH に追加（python-vlc が libvlc.dll を見つけられるようにする）
-_vlc_dir = _find_vlc_dir()
-if _vlc_dir and _vlc_dir not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = _vlc_dir + os.pathsep + os.environ.get("PATH", "")
+def _find_output_device(name: str) -> Optional[int]:
+    """WASAPI 出力デバイスを名前（部分一致）で検索してインデックスを返す。"""
+    wi = _wasapi_idx()
+    lower = name.lower()
+    for i, d in enumerate(sd.query_devices()):
+        if wi is not None and d["hostapi"] != wi:
+            continue
+        if d["max_output_channels"] > 0 and lower in d["name"].lower():
+            return i
+    return None
 
+
+def _out_channels(idx: Optional[int]) -> int:
+    if idx is None:
+        return 2
+    try:
+        return max(1, min(int(sd.query_devices(idx)["max_output_channels"]), 2))
+    except Exception:
+        return 2
+
+
+def _out_samplerate(idx: Optional[int]) -> int:
+    if idx is None:
+        return 48000
+    try:
+        sr = int(sd.query_devices(idx)["default_samplerate"])
+        return sr if sr > 0 else 48000
+    except Exception:
+        return 48000
+
+
+def _to_device_format(
+    data: np.ndarray, file_sr: int, out_idx: Optional[int]
+) -> tuple[np.ndarray, int]:
+    """
+    音声データを出力デバイス向けに整形する。
+    返り値: (float32 配列 shape=(n, out_ch), 出力サンプルレート)
+    """
+    data = data.astype(np.float32)
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+
+    out_ch = _out_channels(out_idx)
+    out_sr = _out_samplerate(out_idx)
+
+    # チャンネル調整
+    if data.shape[1] < out_ch:
+        data = np.repeat(data[:, :1], out_ch, axis=1)
+    elif data.shape[1] > out_ch:
+        data = data[:, :out_ch]
+
+    # サンプルレート変換（必要な場合のみ）
+    if file_sr != out_sr and file_sr > 0:
+        n_out = int(round(len(data) * out_sr / file_sr))
+        x_in  = np.arange(len(data))
+        x_out = np.linspace(0.0, len(data) - 1, n_out)
+        data  = np.column_stack([
+            np.interp(x_out, x_in, data[:, c]).astype(np.float32)
+            for c in range(data.shape[1])
+        ])
+
+    return data, out_sr
+
+
+def _open_output_stream(out_idx, samplerate, channels) -> sd.OutputStream:
+    """低遅延 → 高遅延の順でストリームを開こうとする。"""
+    for latency in ("low", "high"):
+        try:
+            return sd.OutputStream(
+                device=out_idx,
+                samplerate=samplerate,
+                channels=channels,
+                dtype="float32",
+                latency=latency,
+            )
+        except Exception:
+            pass
+    raise RuntimeError(f"出力ストリームを開けませんでした (device={out_idx}, sr={samplerate})")
+
+
+# ── _EffectPlayer ────────────────────────────────────────────────────────────
+
+class _EffectPlayer:
+    """
+    1 つの効果音を別スレッドで再生するクラス。
+    チャンク書き込みループで stop() を確認することで即時停止をサポートする。
+    """
+    _CHUNK = 2048
+
+    def __init__(self, out_idx: Optional[int], data: np.ndarray, samplerate: int):
+        self._out_idx    = out_idx
+        self._data       = data        # shape (n, ch) float32
+        self._samplerate = samplerate
+        self._stop_evt   = threading.Event()
+        self._thread     = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def _run(self) -> None:
+        try:
+            stream = _open_output_stream(
+                self._out_idx, self._samplerate, self._data.shape[1]
+            )
+            with stream:
+                pos = 0
+                while pos < len(self._data) and not self._stop_evt.is_set():
+                    chunk = self._data[pos : pos + self._CHUNK]
+                    stream.write(chunk)
+                    pos += self._CHUNK
+        except Exception as e:
+            print(f"[エラー] 効果音再生失敗: {e}")
+
+
+# ── AudioPlayer ──────────────────────────────────────────────────────────────
 
 class AudioPlayer:
     """
-    メイン音楽の再生・停止・一時停止と、
-    効果音の並列再生（サウンドボード機能）を担うクラス。
+    soundfile + sounddevice ベースのオーディオプレイヤー。
+    公開 API は旧 VLC 版と互換。
     """
 
-    # VLC の Windows 向け WASAPI/MMDevice モジュール名（優先順）
-    _WIN_AUDIO_MODULES = (b"mmdevice", b"wasapi", b"directsound", b"waveout")
-
     def __init__(self):
-        # VLC インスタンス（--quiet でログ抑制）
-        self._instance = vlc.Instance("--quiet")
-        # メイン音楽用プレイヤー
-        self._music_player: Optional[vlc.MediaPlayer] = None
-        # 選択中の出力デバイス description（空文字 = デフォルト）
-        self._output_device: str = ""
-        # 音量 0-100
-        self._volume: int = 80
-        # 効果音プレイヤープールのロック（スレッドセーフ並列再生用）
-        self._effect_lock = threading.Lock()
-        # 再生中の効果音プレイヤーを追跡するリスト（自動GC付き）
-        self._effect_players: list[vlc.MediaPlayer] = []
-        # description → (module_bytes, device_id_bytes) のキャッシュ
-        self._device_map: dict[str, tuple[bytes, bytes]] = {}
+        self._out_idx:  Optional[int] = None
+        self._out_name: str           = ""
+        self._volume:   int           = 80    # 0–100
 
-    # ---------------------------------------------------------------
-    # デバイス関連
-    # ---------------------------------------------------------------
+        # BGM
+        self._bgm_stop  = threading.Event()
+        self._bgm_pause = threading.Event()
+        self._bgm_thread: Optional[threading.Thread] = None
+        self._bgm_state = "stopped"   # "playing" | "paused" | "stopped"
 
-    def _build_device_map(self) -> None:
-        """
-        利用可能な全出力デバイスを列挙して self._device_map を更新します。
-        VLC の AudioOutputDevice はリンクリスト構造のため .contents で辿ります。
-        """
-        self._device_map = {}
-        for mod in self._WIN_AUDIO_MODULES:
-            ptr = self._instance.audio_output_device_list_get(mod)
-            if not ptr:
-                continue
-            node = ptr
-            while node and node.contents:
-                raw_dev  = node.contents.device       # bytes | None
-                raw_desc = node.contents.description  # bytes | None
-                if raw_dev and raw_desc:
-                    desc = raw_desc.decode("utf-8", errors="replace")
-                    self._device_map[desc] = (mod, raw_dev)
-                nxt = node.contents.next
-                if not nxt:
-                    break
-                node = nxt
-            # libvlc_audio_output_device_list_release はバインディング未対応のため
-            # python-vlc の vlc.AudioOutputDevice.__del__ に任せる
-            break  # 最初に成功したモジュールだけ使えば十分
+        # 効果音
+        self._eff_lock    = threading.Lock()
+        self._eff_players: list[_EffectPlayer] = []
+
+    # ── デバイス ──────────────────────────────────────────────────────────
 
     def get_audio_devices(self) -> list[str]:
         """
-        VLC が認識しているオーディオ出力デバイスの一覧を返します。
-        VB-Cable など仮想デバイスも含みます。
-        先頭要素は常に「デフォルト」（空文字キー）です。
+        WASAPI 出力デバイス名一覧（重複なし）を返します。
+        先頭は「デフォルト（システム規定）」です。
         """
-        self._build_device_map()
-        names = list(self._device_map.keys())
-        # 先頭に「デフォルト（システム規定）」を挿入
-        default_label = "デフォルト（システム規定）"
-        if default_label not in names:
-            names.insert(0, default_label)
-        return names
+        wi = _wasapi_idx()
+        seen: set[str] = set()
+        result = ["デフォルト（システム規定）"]
+        for d in sd.query_devices():
+            if wi is not None and d["hostapi"] != wi:
+                continue
+            if d["max_output_channels"] > 0 and d["name"] not in seen:
+                seen.add(d["name"])
+                result.append(d["name"])
+        return result
 
     def set_output_device(self, device_description: str) -> None:
-        """
-        次回再生から使用するオーディオデバイスを設定します。
-        device_description は get_audio_devices() が返した文字列を渡してください。
-        現在再生中のプレイヤーにも即時反映します。
-        """
-        self._output_device = device_description
-        if self._music_player is not None:
-            self._apply_device(self._music_player, device_description)
+        """出力デバイスを設定します。次回 play から反映されます。"""
+        if not device_description or device_description == "デフォルト（システム規定）":
+            self._out_idx  = None
+            self._out_name = ""
+        else:
+            idx = _find_output_device(device_description)
+            self._out_idx  = idx
+            self._out_name = device_description
+            print(f"[デバイス] 出力先: {device_description} (idx={idx})")
 
-    # ---------------------------------------------------------------
-    # 音楽プレイヤー
-    # ---------------------------------------------------------------
+    # ── 音楽プレイヤー ────────────────────────────────────────────────────
 
     def play_music(self, file_path: str) -> None:
-        """音楽ファイルを再生します。すでに再生中の場合は停止してから再生します。"""
         self.stop_music()
-        media = self._instance.media_new(file_path)
-        self._music_player = self._instance.media_player_new()
-        self._music_player.set_media(media)
-        self._music_player.audio_set_volume(self._volume)
-        self._music_player.play()
-        # audio_output_device_set は play() 後・Playing状態になってから適用しないと無視される
-        if self._output_device:
-            self._apply_device_deferred(self._music_player, self._output_device)
+        self._bgm_stop.clear()
+        self._bgm_pause.clear()
+        self._bgm_state  = "playing"
+        self._bgm_thread = threading.Thread(
+            target=self._bgm_run, args=(file_path,), daemon=True
+        )
+        self._bgm_thread.start()
+
+    def _bgm_run(self, file_path: str) -> None:
+        CHUNK = 4096
+        try:
+            with sf.SoundFile(file_path) as f:
+                out_idx = self._out_idx
+                out_ch  = _out_channels(out_idx)
+                file_sr = f.samplerate
+                out_sr  = _out_samplerate(out_idx)
+
+                need_resample = (file_sr != out_sr)
+
+                # WASAPI shared mode (latency="high") は Windows が自動リサンプリングするので
+                # まずファイルのネイティブレートで試みる
+                opened_sr = file_sr
+                try:
+                    stream = _open_output_stream(out_idx, file_sr, out_ch)
+                except Exception:
+                    # 失敗時はデバイスネイティブレートにフォールバック
+                    stream = _open_output_stream(out_idx, out_sr, out_ch)
+                    opened_sr = out_sr
+                    need_resample = (file_sr != opened_sr)
+
+                with stream:
+                    while not self._bgm_stop.is_set():
+                        # 一時停止中はスリープ
+                        while self._bgm_pause.is_set() and not self._bgm_stop.is_set():
+                            time.sleep(0.05)
+                        if self._bgm_stop.is_set():
+                            break
+
+                        chunk = f.read(CHUNK, dtype="float32", always_2d=True)
+                        if len(chunk) == 0:
+                            break
+
+                        # チャンネル調整
+                        if chunk.shape[1] < out_ch:
+                            chunk = np.repeat(chunk[:, :1], out_ch, axis=1)
+                        elif chunk.shape[1] > out_ch:
+                            chunk = chunk[:, :out_ch]
+
+                        # リサンプル（必要な場合）
+                        if need_resample:
+                            n_out = int(round(len(chunk) * opened_sr / file_sr))
+                            x_in  = np.arange(len(chunk))
+                            x_out = np.linspace(0.0, len(chunk) - 1, n_out)
+                            chunk = np.column_stack([
+                                np.interp(x_out, x_in, chunk[:, c]).astype(np.float32)
+                                for c in range(chunk.shape[1])
+                            ])
+
+                        stream.write(chunk * (self._volume / 100.0))
+
+        except Exception as e:
+            print(f"[エラー] BGM 再生失敗: {e}")
+        finally:
+            self._bgm_state = "stopped"
 
     def pause_music(self) -> None:
-        """再生中は一時停止、一時停止中は再開します（トグル）。"""
-        if self._music_player is not None:
-            self._music_player.pause()
+        if self._bgm_state == "playing":
+            self._bgm_pause.set()
+            self._bgm_state = "paused"
+        elif self._bgm_state == "paused":
+            self._bgm_pause.clear()
+            self._bgm_state = "playing"
 
     def stop_music(self) -> None:
-        """音楽を停止してプレイヤーを解放します。"""
-        if self._music_player is not None:
-            self._music_player.stop()
-            self._music_player.release()
-            self._music_player = None
+        self._bgm_stop.set()
+        self._bgm_pause.clear()
+        if self._bgm_thread and self._bgm_thread.is_alive():
+            self._bgm_thread.join(timeout=2.0)
+        self._bgm_thread = None
+        self._bgm_state  = "stopped"
 
     def set_volume(self, volume: int) -> None:
-        """
-        音量を 0–100 の範囲で設定します。
-        メイン音楽プレイヤーに即時反映します（効果音は発火時の音量が適用されます）。
-        """
         self._volume = max(0, min(100, volume))
-        if self._music_player is not None:
-            self._music_player.audio_set_volume(self._volume)
 
     def get_music_state(self) -> str:
-        """再生状態を "playing" / "paused" / "stopped" で返します。"""
-        if self._music_player is None:
-            return "stopped"
-        state = self._music_player.get_state()
-        if state == vlc.State.Playing:
-            return "playing"
-        if state == vlc.State.Paused:
-            return "paused"
-        return "stopped"
+        return self._bgm_state
 
-    # ---------------------------------------------------------------
-    # 効果音（並列再生）
-    # ---------------------------------------------------------------
+    # ── 効果音（並列再生）────────────────────────────────────────────────
 
     def play_effect(self, file_path: str, volume: Optional[int] = None) -> None:
-        """
-        効果音を非同期・並列で再生します（サウンドボード機能）。
-        音楽の再生に割り込まずに重ね再生できます。
-        再生終了後にプレイヤーを自動解放するためスレッドを使います。
-        """
-        vol = volume if volume is not None else self._volume
+        """効果音を非同期・並列で再生します。"""
+        vol     = (volume if volume is not None else self._volume) / 100.0
+        out_idx = self._out_idx
 
-        def _run():
-            import time
-            media = self._instance.media_new(file_path)
-            player = self._instance.media_player_new()
-            player.set_media(media)
-            player.audio_set_volume(vol)
+        try:
+            raw, file_sr = sf.read(file_path, dtype="float32", always_2d=True)
+        except Exception as e:
+            print(f"[エラー] 効果音読み込み失敗: {e}")
+            return
 
-            with self._effect_lock:
-                alive = []
-                for p in self._effect_players:
-                    try:
-                        if p.get_state() not in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
-                            alive.append(p)
-                    except Exception:
-                        pass
-                self._effect_players = alive
-                self._effect_players.append(player)
+        data, out_sr = _to_device_format(raw, file_sr, out_idx)
+        data = (data * vol).astype(np.float32)
 
-            player.play()
-
-            # audio_output_device_set は Playing状態になってから適用する（pre-play は無視される）
-            if self._output_device:
-                for _ in range(40):  # 最大 2 秒待機
-                    try:
-                        if player.get_state() == vlc.State.Playing:
-                            self._apply_device(player, self._output_device)
-                            break
-                    except Exception:
-                        break
-                    time.sleep(0.05)
-
-            # 再生終了を待機してから解放
-            while True:
-                try:
-                    state = player.get_state()
-                except Exception:
-                    break
-                if state in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
-                    break
-                time.sleep(0.05)
-            try:
-                player.release()
-            except Exception:
-                pass
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
+        ep = _EffectPlayer(out_idx, data, out_sr)
+        with self._eff_lock:
+            self._eff_players = [p for p in self._eff_players if p.is_alive()]
+            self._eff_players.append(ep)
+        ep.start()
 
     def stop_all_effects(self) -> None:
-        """現在再生中の効果音をすべて停止します。"""
-        with self._effect_lock:
-            for player in self._effect_players:
-                try:
-                    player.stop()
-                    # release() は _run スレッドに委ねる（二重解放によるアクセス違反を防ぐ）
-                except Exception:
-                    pass
-            self._effect_players.clear()
+        with self._eff_lock:
+            for ep in self._eff_players:
+                ep.stop()
+            self._eff_players.clear()
 
-    # ---------------------------------------------------------------
-    # 内部ユーティリティ
-    # ---------------------------------------------------------------
-
-    def _apply_device(self, player: vlc.MediaPlayer, device_description: str) -> None:
-        """
-        指定プレイヤーの出力先デバイスを変更します。
-        play() 後・Playing状態で呼ぶこと（pre-play設定は VLC に無視される）。
-        """
-        if not device_description or device_description == "デフォルト（システム規定）":
-            return
-        if device_description not in self._device_map:
-            self._build_device_map()
-        entry = self._device_map.get(device_description)
-        if entry is None:
-            print(f"[警告] デバイス未検出: '{device_description}'")
-            return
-        mod_bytes, dev_id_bytes = entry
-        mod_str = mod_bytes.decode("ascii")
-        dev_str = dev_id_bytes.decode("ascii", errors="replace")
-        try:
-            player.audio_output_set(mod_str)
-            player.audio_output_device_set(mod_str, dev_str)
-            print(f"[デバイス] → {device_description} ({mod_str})")
-        except Exception as e:
-            print(f"[警告] デバイス設定失敗 ({device_description}): {e}")
-
-    def _apply_device_deferred(self, player: vlc.MediaPlayer, device_description: str) -> None:
-        """play() 直後に呼ぶ。Playing状態になるまで待ってから _apply_device を実行する。"""
-        import time
-
-        def _wait_and_apply():
-            for _ in range(40):  # 最大 2 秒
-                try:
-                    if player.get_state() == vlc.State.Playing:
-                        self._apply_device(player, device_description)
-                        return
-                except Exception:
-                    return
-                time.sleep(0.05)
-            # タイムアウト時も一応試みる
-            self._apply_device(player, device_description)
-
-        threading.Thread(target=_wait_and_apply, daemon=True).start()
+    # ── 解放 ─────────────────────────────────────────────────────────────
 
     def release(self) -> None:
-        """アプリ終了時にすべてのリソースを解放します。main.py から呼び出してください。"""
         try:
             self.stop_music()
         except Exception:
@@ -278,7 +329,4 @@ class AudioPlayer:
             self.stop_all_effects()
         except Exception:
             pass
-        try:
-            self._instance.release()
-        except Exception:
-            pass
+

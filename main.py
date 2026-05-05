@@ -233,10 +233,10 @@ def main():
 
     def on_mic_toggle(enabled: bool):
         if enabled:
-            mic_in_name  = settings.get("mic_input_device", "")
-            vlc_out_name = settings.get("output_device", "")
+            mic_in_name = settings.get("mic_input_device", "")
+            out_name    = settings.get("output_device", "")
             try:
-                mic.start(mic_in_name, vlc_out_name)
+                mic.start(mic_in_name, out_name)
             except Exception as e:
                 print(f"[エラー] マイクパス送信開始失敗: {e}")
                 app.after(0, lambda: app.set_mic_active(False))
@@ -248,9 +248,9 @@ def main():
         save_settings(settings)
         # パス送信中ならデバイスを切り替えて再起動
         if mic.active:
-            vlc_out_name = settings.get("output_device", "")
+            out_name = settings.get("output_device", "")
             try:
-                mic.start(device_name, vlc_out_name)
+                mic.start(device_name, out_name)
                 app.set_mic_active(True)
             except Exception as e:
                 print(f"[エラー] マイクパス送信再起動失敗: {e}")
