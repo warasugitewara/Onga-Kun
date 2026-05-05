@@ -233,6 +233,7 @@ class AudioPlayer:
         self._out_idx:  Optional[int] = None
         self._out_name: str           = ""
         self._volume:   int           = 50    # 0–100
+        self._monitor_idx: Optional[int] = None  # 自己モニター用デバイス
 
         # BGM
         self._bgm_stop  = threading.Event()
@@ -272,6 +273,17 @@ class AudioPlayer:
             self._out_idx  = idx
             self._out_name = device_description
             print(f"[デバイス] 出力先: {device_description} (idx={idx})")
+
+    def set_monitor_device(self, name: str) -> None:
+        """自己モニター用の出力デバイスを設定します。"なし" または空文字でモニター無効。"""
+        if not name or name == "なし" or name == "デフォルト（システム規定）":
+            self._monitor_idx = None
+            print("[モニター] 無効")
+        else:
+            idx = _find_output_device(name)
+            self._monitor_idx = idx
+            dev = sd.query_devices(idx)["name"] if idx is not None else "未検出"
+            print(f"[モニター] {dev} (idx={idx})")
 
     # ── 音楽プレイヤー ────────────────────────────────────────────────────
 
@@ -397,11 +409,20 @@ class AudioPlayer:
         dev_name = sd.query_devices(out_idx)["name"] if out_idx is not None else "デフォルト"
         print(f"[再生] {os.path.basename(file_path)}  vol={vol:.0%}  peak={float(np.abs(data).max()):.3f}  device=[{out_idx}]{dev_name}  sr={out_sr}")
 
-        ep = _EffectPlayer(out_idx, data, out_sr)
+        eps: list[_EffectPlayer] = [_EffectPlayer(out_idx, data, out_sr)]
+
+        # 自己モニター：メインデバイスと異なる場合のみ同時再生
+        mon_idx = self._monitor_idx
+        if mon_idx is not None and mon_idx != out_idx:
+            mon_data, mon_sr = _to_device_format(raw, file_sr, mon_idx)
+            mon_data = np.clip(mon_data * vol, -1.0, 1.0).astype(np.float32)
+            eps.append(_EffectPlayer(mon_idx, mon_data, mon_sr))
+
         with self._eff_lock:
             self._eff_players = [p for p in self._eff_players if p.is_alive()]
-            self._eff_players.append(ep)
-        ep.start()
+            self._eff_players.extend(eps)
+        for ep in eps:
+            ep.start()
 
     def stop_all_effects(self) -> None:
         with self._eff_lock:

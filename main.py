@@ -26,6 +26,7 @@ def load_settings() -> dict:
     default: dict = {
         "output_device": "", "volume": 50,
         "mic_input_device": "", "mic_volume": 80,
+        "monitor_device": "",
         "soundboard": [],
     }
     if not os.path.exists(SETTINGS_PATH):
@@ -95,12 +96,15 @@ def main():
 
     # VLC デバイス列挙はバックグラウンドで実行
     def _load_devices():
-        devices = player.get_audio_devices()
-        saved   = settings.get("output_device", "")
-        # ← 保存済みデバイスを player にも反映（これがないと起動後は常にデフォルト出力になる）
+        devices   = player.get_audio_devices()
+        saved     = settings.get("output_device", "")
+        saved_mon = settings.get("monitor_device", "")
         if saved:
             player.set_output_device(saved)
+        if saved_mon and saved_mon not in ("", "なし"):
+            player.set_monitor_device(saved_mon)
         app.after(0, lambda: app.set_devices(devices, saved))
+        app.after(0, lambda: app.set_monitor_devices(devices, saved_mon))
 
     threading.Thread(target=_load_devices, daemon=True).start()
 
@@ -199,6 +203,11 @@ def main():
     def on_device(device_name: str):
         settings["output_device"] = device_name
         player.set_output_device(device_name)
+
+    def on_monitor_device(device_name: str):
+        settings["monitor_device"] = device_name
+        player.set_monitor_device(device_name)
+        save_settings(settings)
 
     def on_effect(item_id: int):
         for item in settings.get("soundboard", []):
@@ -300,6 +309,7 @@ def main():
         on_mic_device=on_mic_device,
         on_mic_volume=on_mic_volume,
         on_mic_monitor=on_mic_monitor,
+        on_monitor_device=on_monitor_device,
     )
 
     # ── メインループ ────────────────────────────────────────────────────────

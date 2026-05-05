@@ -4,6 +4,7 @@ Voicemod / Discord サウンドボード風のモダンダーク UI
 """
 
 import customtkinter as ctk
+import keyboard
 from tkinter import filedialog, Menu
 from typing import Callable, Optional
 
@@ -38,6 +39,14 @@ def _lighten(hex_color: str, amount: int = 28) -> str:
     g = min(255, int(h[2:4], 16) + amount)
     b = min(255, int(h[4:6], 16) + amount)
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _build_hotkey_string(keys: set) -> str:
+    """キーセットからホットキー文字列を生成（例: {'ctrl','shift','f1'} → 'ctrl+shift+f1'）"""
+    MODS = {"ctrl", "shift", "alt", "windows"}
+    mods = sorted(k for k in keys if k in MODS)
+    rest = sorted(k for k in keys if k not in MODS)
+    return "+".join(mods + rest)
 
 
 # ── サウンドボードボタン ────────────────────────────────────────────────────
@@ -122,7 +131,7 @@ class EditDialog(ctk.CTkToplevel):
     def __init__(self, parent, item: dict, on_save: Callable):
         super().__init__(parent)
         self.title("効果音を編集")
-        self.geometry("440x280")
+        self.geometry("460x295")
         self.resizable(False, False)
         self.configure(fg_color=SURFACE)
         self.grab_set()
@@ -154,11 +163,35 @@ class EditDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             self, text="ホットキー", font=ctk.CTkFont(size=11), text_color=TEXT_SUB
         ).pack(anchor="w", padx=24, pady=(8, 2))
-        self.key_ent = ctk.CTkEntry(
-            self, width=392, placeholder_text="例: F1  /  ctrl+1  /  alt+g"
+
+        # キャプチャ状態
+        self._hotkey_val: str = item.get("hotkey", "")
+        self._capturing: bool = False
+        self._held_keys: set  = set()
+        self._kb_hook         = None
+
+        key_row = ctk.CTkFrame(self, fg_color="transparent")
+        key_row.pack(fill="x", padx=24, pady=5)
+        self.key_lbl = ctk.CTkLabel(
+            key_row,
+            text=self._hotkey_val if self._hotkey_val else "未設定",
+            width=190, anchor="w",
+            fg_color="#2b2b3a", corner_radius=6,
+            text_color=TEXT if self._hotkey_val else TEXT_SUB,
         )
-        self.key_ent.insert(0, item.get("hotkey", ""))
-        self.key_ent.pack(**F)
+        self.key_lbl.pack(side="left", ipadx=8, ipady=4)
+        self.key_btn = ctk.CTkButton(
+            key_row, text="🎹 クリックして設定", width=152,
+            command=self._start_capture,
+        )
+        self.key_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            key_row, text="✕", width=32,
+            fg_color="#3a3a4a", hover_color="#4a4a5a",
+            command=self._clear_hotkey,
+        ).pack(side="left", padx=(4, 0))
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(pady=16)
@@ -178,11 +211,77 @@ class EditDialog(ctk.CTkToplevel):
             self.file_ent.delete(0, "end")
             self.file_ent.insert(0, path)
 
+    # ── キーキャプチャ ──────────────────────────────────────────────────────
+
+    def _start_capture(self):
+        if self._capturing:
+            return
+        self._capturing = True
+        self._held_keys = set()
+        self.key_lbl.configure(text="⌨ キーを押してください… (ESC でキャンセル)", text_color=TEXT_SUB)
+        self.key_btn.configure(text="待機中…", fg_color=RED_BTN, state="disabled")
+        self._kb_hook = keyboard.hook(self._on_key_event, suppress=False)
+
+    def _on_key_event(self, event):
+        if not self._capturing:
+            return
+        name = (event.name or "").lower()
+        if event.event_type == keyboard.KEY_DOWN:
+            if name == "esc":
+                self._capturing = False
+                self.after(0, self._cancel_capture_ui)
+                return
+            self._held_keys.add(name)
+        elif event.event_type == keyboard.KEY_UP:
+            if self._held_keys:
+                combo = _build_hotkey_string(self._held_keys)
+                self._capturing = False
+                self.after(0, lambda c=combo: self._finish_capture(c))
+
+    def _cancel_capture_ui(self):
+        self._unhook_kb()
+        self._held_keys.clear()
+        self._reset_btn()
+
+    def _finish_capture(self, combo: str):
+        self._unhook_kb()
+        self._hotkey_val = combo
+        self.key_lbl.configure(text=combo, text_color=TEXT)
+        self._reset_btn()
+
+    def _reset_btn(self):
+        if not self._hotkey_val:
+            self.key_lbl.configure(text="未設定", text_color=TEXT_SUB)
+        self.key_btn.configure(
+            text="🎹 クリックして設定",
+            fg_color=("#3B8ED0", "#1F6AA5"),
+            state="normal",
+        )
+
+    def _clear_hotkey(self):
+        if self._capturing:
+            return
+        self._hotkey_val = ""
+        self.key_lbl.configure(text="未設定", text_color=TEXT_SUB)
+
+    def _unhook_kb(self):
+        if self._kb_hook is not None:
+            try:
+                keyboard.unhook(self._kb_hook)
+            except Exception:
+                pass
+            self._kb_hook = None
+
+    def destroy(self):
+        self._unhook_kb()
+        self._capturing = False
+        super().destroy()
+
     def _save(self):
         name = self.name_ent.get().strip()
         self._item["name"]   = name if name else self._item["name"]
         self._item["file"]   = self.file_ent.get().strip()
-        self._item["hotkey"] = self.key_ent.get().strip()
+        self._item["hotkey"] = self._hotkey_val
         self._on_save(self._item)
         self.destroy()
 
@@ -212,6 +311,7 @@ class App(ctk.CTk):
         self._cb_mic_device:  Optional[Callable[[str], None]]  = None
         self._cb_mic_volume:  Optional[Callable[[int], None]]  = None
         self._cb_mic_monitor: Optional[Callable[[bool], None]] = None
+        self._cb_monitor_device: Optional[Callable[[str], None]] = None
 
         self._music_file = ""
         self._all_items: list[dict] = []
@@ -264,6 +364,14 @@ class App(ctk.CTk):
             header, width=230, values=["読み込み中…"], command=self._on_device
         )
         self.device_cb.pack(side="right", padx=(0, 16))
+
+        ctk.CTkLabel(
+            header, text="モニター:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
+        ).pack(side="right", padx=(0, 4))
+        self.monitor_cb = ctk.CTkComboBox(
+            header, width=170, values=["なし"], command=self._on_monitor_device
+        )
+        self.monitor_cb.pack(side="right", padx=(0, 8))
 
     def _build_main(self):
         # アクションバー（検索・追加・全停止）
@@ -386,7 +494,7 @@ class App(ctk.CTk):
         on_volume, on_device, on_effect,
         on_edit_sound, on_delete_sound, on_add_sound,
         on_mic_toggle=None, on_mic_device=None, on_mic_volume=None,
-        on_mic_monitor=None,
+        on_mic_monitor=None, on_monitor_device=None,
     ):
         self._cb_play         = on_play
         self._cb_pause        = on_pause
@@ -402,6 +510,7 @@ class App(ctk.CTk):
         self._cb_mic_device   = on_mic_device
         self._cb_mic_volume   = on_mic_volume
         self._cb_mic_monitor  = on_mic_monitor
+        self._cb_monitor_device = on_monitor_device
 
     def set_devices(self, devices: list[str], current: str = ""):
         self.device_cb.configure(values=devices)
@@ -419,6 +528,13 @@ class App(ctk.CTk):
         target = current if (current and current in devices) else (devices[0] if devices else "")
         if target:
             self.mic_input_cb.set(target)
+
+    def set_monitor_devices(self, devices: list[str], current: str = ""):
+        """モニター出力デバイスのドロップダウンを更新します。"""
+        all_opts = ["なし"] + devices
+        self.monitor_cb.configure(values=all_opts)
+        target = current if (current and current in all_opts) else "なし"
+        self.monitor_cb.set(target)
 
     def set_mic_active(self, active: bool):
         """パス送信ボタンの表示状態を更新します（外部から呼ぶ用）。"""
@@ -539,6 +655,10 @@ class App(ctk.CTk):
     def _on_device(self, selected: str):
         if self._cb_device:
             self._cb_device(selected)
+
+    def _on_monitor_device(self, selected: str):
+        if self._cb_monitor_device:
+            self._cb_monitor_device(selected)
 
     def _on_stop_all(self):
         if self._cb_stop_all:
