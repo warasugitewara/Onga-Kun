@@ -353,7 +353,10 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT,
         ).pack(side="left", padx=18)
 
-        # 右端から詰める：音量ラベル → スライダー → 🔊 → デバイス名ラベル → ComboBox
+        # side="right" は後から pack したものが左寄りになるため、
+        # 各ペアは「ComboBox → ラベル」の順で pack する
+        # 結果の左→右表示: モニター:[CB]  出力先:[CB]  🔊 [slider] 80
+
         self.vol_label = ctk.CTkLabel(
             header, text="80", width=28,
             text_color=TEXT_SUB, font=ctk.CTkFont(size=12),
@@ -366,24 +369,25 @@ class App(ctk.CTk):
         self.vol_slider.set(80)
         self.vol_slider.pack(side="right", padx=(0, 4))
 
-        ctk.CTkLabel(header, text="🔊", text_color=TEXT_SUB).pack(side="right", padx=(0, 4))
+        ctk.CTkLabel(header, text="🔊", text_color=TEXT_SUB).pack(side="right", padx=(0, 8))
 
-        ctk.CTkLabel(
-            header, text="出力先:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
-        ).pack(side="right", padx=(0, 6))
-
+        # 出力先: ComboBox を先に pack → ラベルが左側に来る
         self.device_cb = ctk.CTkComboBox(
             header, width=230, values=["読み込み中…"], command=self._on_device
         )
         self.device_cb.pack(side="right", padx=(0, 16))
-
         ctk.CTkLabel(
-            header, text="モニター:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
+            header, text="出力先:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
         ).pack(side="right", padx=(0, 4))
+
+        # モニター: ComboBox を先に pack → ラベルが左側に来る
         self.monitor_cb = ctk.CTkComboBox(
             header, width=170, values=["なし"], command=self._on_monitor_device
         )
-        self.monitor_cb.pack(side="right", padx=(0, 8))
+        self.monitor_cb.pack(side="right", padx=(0, 16))
+        ctk.CTkLabel(
+            header, text="モニター:", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)
+        ).pack(side="right", padx=(0, 4))
 
     def _build_main(self):
         # アクションバー（検索・追加・全停止）
