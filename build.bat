@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 chcp 65001 >nul
-title 音ガくん ビルド
+title Onga-Kun Build
 
 echo.
 echo ╔══════════════════════════════════════════╗
-echo ║         音ガくん  リリースビルド              ║
+echo ║            Onga-Kun  Release Build                ║
 echo ╚══════════════════════════════════════════╝
 echo.
 

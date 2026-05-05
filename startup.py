@@ -8,7 +8,7 @@ import os
 import sys
 import winreg
 
-_APP_NAME = "OngaKun"
+_APP_NAME = "Onga-Kun"
 _REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 

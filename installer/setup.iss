@@ -2,7 +2,7 @@
 ; build.bat から自動実行されます。
 ; 手動実行: Inno Setup Compiler で setup.iss を開いてビルド
 
-#define MyAppName    "音ガくん"
+#define MyAppName    "Onga-Kun"
 #define MyAppNameEn  "onga-kun"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "warasugitewara"

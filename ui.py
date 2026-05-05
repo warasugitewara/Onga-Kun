@@ -1,5 +1,5 @@
 """
-ui.py  ―  音ガくん UIモジュール
+ui.py  ―  Onga-Kun UIモジュール
 Voicemod / Discord サウンドボード風のモダンダーク UI
 """
 
@@ -365,7 +365,7 @@ class SettingsDialog(ctk.CTkToplevel):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("音ガくん")
+        self.title("Onga-Kun")
         self.geometry("960x640")
         self.minsize(800, 520)
         self.configure(fg_color=BG)
@@ -417,7 +417,7 @@ class App(ctk.CTk):
         header.pack_propagate(False)
 
         ctk.CTkLabel(
-            header, text="🎛  音ガくん",
+            header, text="🎛  Onga-Kun",
             font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT,
         ).pack(side="left", padx=18)
 
