@@ -1,55 +1,52 @@
 # onga-kun.spec  ─  PyInstaller ビルド定義
+# sounddevice + soundfile + numpy + customtkinter 版
 # build.bat から自動実行されます。手動実行: pyinstaller onga-kun.spec
 
-import glob
 import os
-import sys
+from PyInstaller.utils.hooks import collect_data_files
 
-# ── VLC バイナリの収集 ────────────────────────────────────────────────────
-# build.bat が ONGA_VLC_DIR 環境変数をセットします。
-# 手動実行時はここを直接書き換えてください。
-vlc_dir = os.environ.get("ONGA_VLC_DIR", r"C:\Program Files\VideoLAN\VLC")
+# ── ランタイム DLL を含むデータパッケージを収集 ────────────────────────────
 
-binaries = []
-datas    = []
+# CustomTkinter: テーマ JSON・画像など（これがないと起動時に KeyError/FileNotFoundError）
+datas = collect_data_files("customtkinter")
 
-if os.path.isdir(vlc_dir):
-    # libvlc.dll / libvlccore.dll などを直下に配置
-    for dll in glob.glob(os.path.join(vlc_dir, "*.dll")):
-        binaries.append((dll, "."))
-    # plugins フォルダをそのまま同梱（コーデック等）
-    plugins = os.path.join(vlc_dir, "plugins")
-    if os.path.isdir(plugins):
-        datas.append((plugins, "plugins"))
-    # locale フォルダ（任意）
-    locale = os.path.join(vlc_dir, "locale")
-    if os.path.isdir(locale):
-        datas.append((locale, "locale"))
-else:
-    print(f"[spec 警告] VLC ディレクトリが見つかりません: {vlc_dir}")
+# sounddevice: PortAudio DLL（libportaudio64bit.dll）
+datas += collect_data_files("_sounddevice_data")
 
-# ── アプリ本体のデータファイル ─────────────────────────────────────────────
-# settings.json は exe 隣に置く（書き込みが発生するため datas に含めない）
-# アイコンがあれば追加（icon.ico を用意した場合）
-app_datas = []
-# app_datas.append(("assets", "assets"))  # ← アイコン画像などを入れる場合
+# soundfile: libsndfile DLL（libsndfile_x64.dll）
+datas += collect_data_files("_soundfile_data")
+
+# 配布用サンプル設定（settings.json 本体は exe 隣に置くので同梱しない）
+if os.path.exists("settings.example.json"):
+    datas += [("settings.example.json", ".")]
 
 # ── Analysis ─────────────────────────────────────────────────────────────
 a = Analysis(
     ["main.py"],
     pathex=["."],
-    binaries=binaries,
-    datas=datas + app_datas,
+    binaries=[],
+    datas=datas,
     hiddenimports=[
         "customtkinter",
-        "vlc",
+        "darkdetect",
         "keyboard",
+        "sounddevice",
+        "soundfile",
+        "_sounddevice",
+        "_sounddevice_data",
+        "_soundfile",
+        "_soundfile_data",
+        "numpy",
+        "cffi",
+        "_cffi_backend",
+        "winreg",        # startup.py で使用
     ],
     hookspath=[],
     runtime_hooks=[],
     excludes=[
-        "matplotlib", "numpy", "pandas", "scipy",
+        "matplotlib", "pandas", "scipy",
         "tkinter.test", "unittest",
+        "vlc",
     ],
     noarchive=False,
 )

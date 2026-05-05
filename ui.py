@@ -296,6 +296,71 @@ class EditDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+# ── 設定ダイアログ ─────────────────────────────────────────────────────────
+class SettingsDialog(ctk.CTkToplevel):
+    """アプリ設定ダイアログ（現在: Windows 自動起動 ON/OFF）"""
+
+    def __init__(self, parent, *, startup_enabled: bool,
+                 on_startup_change: Optional[Callable[[bool], None]] = None):
+        super().__init__(parent)
+        self.title("設定")
+        self.geometry("380x210")
+        self.resizable(False, False)
+        self.configure(fg_color=BG)
+        self._on_startup_change = on_startup_change
+
+        ctk.CTkLabel(
+            self, text="⚙  設定",
+            font=ctk.CTkFont(size=15, weight="bold"), text_color=TEXT,
+        ).pack(pady=(20, 10))
+
+        ctk.CTkFrame(self, height=1, fg_color=BORDER).pack(fill="x", padx=20)
+
+        # 自動起動 row
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=18)
+
+        col = ctk.CTkFrame(row, fg_color="transparent")
+        col.pack(side="left")
+        ctk.CTkLabel(
+            col, text="Windows 起動時に自動起動",
+            font=ctk.CTkFont(size=13), text_color=TEXT,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            col, text="バックグラウンドで待機します（デフォルト: OFF）",
+            font=ctk.CTkFont(size=11), text_color=TEXT_SUB,
+        ).pack(anchor="w", pady=(2, 0))
+
+        self._startup_sw = ctk.CTkSwitch(row, text="", width=46, command=self._on_toggle)
+        self._startup_sw.pack(side="right")
+        if startup_enabled:
+            self._startup_sw.select()
+        else:
+            self._startup_sw.deselect()
+
+        ctk.CTkButton(
+            self, text="閉じる", width=110,
+            fg_color=BORDER, hover_color="#3e4160",
+            command=self.destroy,
+        ).pack(pady=(0, 20))
+
+        self.grab_set()
+        self.lift()
+        self.focus_force()
+        self.after(20, self._center)
+
+    def _center(self):
+        self.update_idletasks()
+        w, h = self.winfo_width(), self.winfo_height()
+        px, py = self.master.winfo_x(), self.master.winfo_y()
+        pw, ph = self.master.winfo_width(), self.master.winfo_height()
+        self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    def _on_toggle(self):
+        if self._on_startup_change:
+            self._on_startup_change(self._startup_sw.get() == 1)
+
+
 # ── メインウィンドウ ────────────────────────────────────────────────────────
 class App(ctk.CTk):
     def __init__(self):
@@ -324,6 +389,9 @@ class App(ctk.CTk):
         self._cb_monitor_device: Optional[Callable[[str], None]] = None
         self._cb_capture_start: Optional[Callable[[], None]] = None
         self._cb_capture_end:   Optional[Callable[[], None]] = None
+        self._cb_startup_change: Optional[Callable[[bool], None]] = None
+
+        self._startup_enabled = False  # 現在のスタートアップ状態
 
         self._music_file = ""
         self._all_items: list[dict] = []
@@ -352,6 +420,13 @@ class App(ctk.CTk):
             header, text="🎛  音ガくん",
             font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT,
         ).pack(side="left", padx=18)
+
+        ctk.CTkButton(
+            header, text="⚙", width=32, height=32,
+            fg_color="transparent", hover_color=BORDER,
+            font=ctk.CTkFont(size=15),
+            command=self._open_settings,
+        ).pack(side="left", padx=(0, 8))
 
         # side="right" は後から pack したものが左寄りになるため、
         # 各ペアは「ComboBox → ラベル」の順で pack する
@@ -512,6 +587,7 @@ class App(ctk.CTk):
         on_mic_toggle=None, on_mic_device=None, on_mic_volume=None,
         on_mic_monitor=None, on_monitor_device=None,
         on_capture_start=None, on_capture_end=None,
+        on_startup_change=None,
     ):
         self._cb_play           = on_play
         self._cb_pause          = on_pause
@@ -530,12 +606,29 @@ class App(ctk.CTk):
         self._cb_monitor_device = on_monitor_device
         self._cb_capture_start  = on_capture_start
         self._cb_capture_end    = on_capture_end
+        self._cb_startup_change = on_startup_change
+
+    def set_startup_state(self, enabled: bool):
+        """スタートアップ状態を UI に反映します（設定ダイアログ用）。"""
+        self._startup_enabled = enabled
+
+    def _open_settings(self):
+        SettingsDialog(
+            self,
+            startup_enabled=self._startup_enabled,
+            on_startup_change=self._on_startup_change,
+        )
 
     def set_devices(self, devices: list[str], current: str = ""):
         self.device_cb.configure(values=devices)
         target = current if (current and current in devices) else (devices[0] if devices else "")
         if target:
             self.device_cb.set(target)
+
+    def _on_startup_change(self, enabled: bool):
+        self._startup_enabled = enabled
+        if self._cb_startup_change:
+            self._cb_startup_change(enabled)
 
     def set_volume(self, volume: int):
         self.vol_slider.set(volume)
