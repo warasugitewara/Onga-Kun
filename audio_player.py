@@ -392,7 +392,10 @@ class AudioPlayer:
             return
 
         data, out_sr = _to_device_format(raw, file_sr, out_idx)
-        data = (data * vol).astype(np.float32)
+        data = np.clip(data * vol, -1.0, 1.0).astype(np.float32)
+
+        dev_name = sd.query_devices(out_idx)["name"] if out_idx is not None else "デフォルト"
+        print(f"[再生] {os.path.basename(file_path)}  vol={vol:.0%}  peak={float(np.abs(data).max()):.3f}  device=[{out_idx}]{dev_name}  sr={out_sr}")
 
         ep = _EffectPlayer(out_idx, data, out_sr)
         with self._eff_lock:
