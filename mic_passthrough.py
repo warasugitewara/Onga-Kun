@@ -277,13 +277,17 @@ class _SplitStream:
 
     通常の sd.Stream (duplex) は入出力が同一サンプルレートでないと
     -9997 (paInvalidSampleRate) が発生する。
-    このクラスは入力側のレートでキャプチャし、queue 経由で出力側へ渡すことで
-    PortAudio のリサンプリングに任せてレート差を吸収する。
+    このクラスは:
+      1. 入力コールバックで numpy 線形補間によりリサンプリング（例: 48kHz→96kHz）
+      2. リサンプリング済みサンプルを deque リングバッファへ積む
+      3. 出力コールバックはリングバッファから必要分だけ取り出す
+    これにより入出力レート差による音程変化・ノイズを解消する。
 
     インターフェースは sd.Stream に合わせており stop()/close() で停止できる。
     """
 
-    _Q_MAXSIZE = 32   # 約 512×32 = 16384 サンプル ≒ 340ms のバッファ
+    # リングバッファ容量: 出力側サンプルレート × 0.5秒 分
+    _RING_CAP = 96000
 
     def __init__(
         self,
@@ -291,36 +295,39 @@ class _SplitStream:
         out_idx: Optional[int],
         vol_getter,           # callable() -> float (0.0–2.0)
     ):
-        self._in_idx    = in_idx
-        self._out_idx   = out_idx
-        self._vol_getter = vol_getter
-        self._q: _queue_mod.Queue = _queue_mod.Queue(maxsize=self._Q_MAXSIZE)
+        from collections import deque
 
-        in_sr   = _device_samplerate(in_idx)
-        out_sr  = _device_samplerate(out_idx)
-        out_ch  = _device_out_channels(out_idx)
+        in_sr  = _device_samplerate(in_idx)
+        out_sr = _device_samplerate(out_idx)
+        out_ch = _device_out_channels(out_idx)
+        ratio  = out_sr / in_sr if in_sr else 1.0
+
+        ring = deque(maxlen=self._RING_CAP)
+        lock = threading.Lock()
 
         def _in_cb(indata, frames, time_info, status):
-            vol  = self._vol_getter()
-            mono = (indata[:, 0:1] * vol).astype("float32")
-            try:
-                self._q.put_nowait(mono)
-            except _queue_mod.Full:
-                pass  # バッファ溢れは無音より安全
+            vol  = vol_getter()
+            mono = (indata[:, 0] * vol).astype("float32")
+            if ratio != 1.0:
+                # 線形補間でリサンプリング（48kHz→96kHz なら 2 倍に伸ばす）
+                n_out = int(round(len(mono) * ratio))
+                x_in  = np.arange(len(mono))
+                x_out = np.linspace(0.0, len(mono) - 1, n_out)
+                mono  = np.interp(x_out, x_in, mono).astype("float32")
+            with lock:
+                ring.extend(mono)
 
         def _out_cb(outdata, frames, time_info, status):
-            try:
-                chunk = self._q.get_nowait()
-            except _queue_mod.Empty:
-                outdata.fill(0)
-                return
+            chunk = np.zeros(frames, dtype="float32")
+            with lock:
+                n = min(frames, len(ring))
+                for i in range(n):
+                    chunk[i] = ring.popleft()
             if out_ch == 1:
-                outdata[:len(chunk)] = chunk
+                outdata[:, 0] = chunk
             else:
-                outdata[:len(chunk)] = np.repeat(chunk, out_ch, axis=1)
-            # chunk がフレーム数より短い場合はゼロ埋め
-            if len(chunk) < frames:
-                outdata[len(chunk):] = 0
+                for c in range(out_ch):
+                    outdata[:, c] = chunk
 
         self._in_stream = sd.InputStream(
             device=in_idx,
