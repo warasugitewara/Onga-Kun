@@ -128,7 +128,8 @@ class SoundboardButton(ctk.CTkFrame):
 class EditDialog(ctk.CTkToplevel):
     """効果音の名前・ファイル・ホットキーを編集するモーダルダイアログ"""
 
-    def __init__(self, parent, item: dict, on_save: Callable):
+    def __init__(self, parent, item: dict, on_save: Callable,
+                 on_capture_start: Callable = None, on_capture_end: Callable = None):
         super().__init__(parent)
         self.title("効果音を編集")
         self.geometry("460x295")
@@ -138,8 +139,10 @@ class EditDialog(ctk.CTkToplevel):
         self.lift()
         self.focus_force()
 
-        self._item    = dict(item)
-        self._on_save = on_save
+        self._item             = dict(item)
+        self._on_save          = on_save
+        self._on_capture_start = on_capture_start
+        self._on_capture_end   = on_capture_end
 
         F = {"padx": 24, "pady": 5}
 
@@ -220,6 +223,9 @@ class EditDialog(ctk.CTkToplevel):
         self._held_keys = set()
         self.key_lbl.configure(text="⌨ キーを押してください… (ESC でキャンセル)", text_color=TEXT_SUB)
         self.key_btn.configure(text="待機中…", fg_color=RED_BTN, state="disabled")
+        # キャプチャ中はグローバルホットキーを一時無効化して誤発火を防ぐ
+        if self._on_capture_start:
+            self._on_capture_start()
         self._kb_hook = keyboard.hook(self._on_key_event, suppress=False)
 
     def _on_key_event(self, event):
@@ -242,12 +248,16 @@ class EditDialog(ctk.CTkToplevel):
         self._unhook_kb()
         self._held_keys.clear()
         self._reset_btn()
+        if self._on_capture_end:
+            self._on_capture_end()
 
     def _finish_capture(self, combo: str):
         self._unhook_kb()
         self._hotkey_val = combo
         self.key_lbl.configure(text=combo, text_color=TEXT)
         self._reset_btn()
+        if self._on_capture_end:
+            self._on_capture_end()
 
     def _reset_btn(self):
         if not self._hotkey_val:
@@ -312,6 +322,8 @@ class App(ctk.CTk):
         self._cb_mic_volume:  Optional[Callable[[int], None]]  = None
         self._cb_mic_monitor: Optional[Callable[[bool], None]] = None
         self._cb_monitor_device: Optional[Callable[[str], None]] = None
+        self._cb_capture_start: Optional[Callable[[], None]] = None
+        self._cb_capture_end:   Optional[Callable[[], None]] = None
 
         self._music_file = ""
         self._all_items: list[dict] = []
@@ -495,22 +507,25 @@ class App(ctk.CTk):
         on_edit_sound, on_delete_sound, on_add_sound,
         on_mic_toggle=None, on_mic_device=None, on_mic_volume=None,
         on_mic_monitor=None, on_monitor_device=None,
+        on_capture_start=None, on_capture_end=None,
     ):
-        self._cb_play         = on_play
-        self._cb_pause        = on_pause
-        self._cb_stop         = on_stop
-        self._cb_stop_all     = on_stop_all
-        self._cb_volume       = on_volume
-        self._cb_device       = on_device
-        self._cb_effect       = on_effect
-        self._cb_edit         = on_edit_sound
-        self._cb_delete       = on_delete_sound
-        self._cb_add          = on_add_sound
-        self._cb_mic_toggle   = on_mic_toggle
-        self._cb_mic_device   = on_mic_device
-        self._cb_mic_volume   = on_mic_volume
-        self._cb_mic_monitor  = on_mic_monitor
+        self._cb_play           = on_play
+        self._cb_pause          = on_pause
+        self._cb_stop           = on_stop
+        self._cb_stop_all       = on_stop_all
+        self._cb_volume         = on_volume
+        self._cb_device         = on_device
+        self._cb_effect         = on_effect
+        self._cb_edit           = on_edit_sound
+        self._cb_delete         = on_delete_sound
+        self._cb_add            = on_add_sound
+        self._cb_mic_toggle     = on_mic_toggle
+        self._cb_mic_device     = on_mic_device
+        self._cb_mic_volume     = on_mic_volume
+        self._cb_mic_monitor    = on_mic_monitor
         self._cb_monitor_device = on_monitor_device
+        self._cb_capture_start  = on_capture_start
+        self._cb_capture_end    = on_capture_end
 
     def set_devices(self, devices: list[str], current: str = ""):
         self.device_cb.configure(values=devices)
@@ -609,7 +624,9 @@ class App(ctk.CTk):
         def _save(updated: dict):
             if self._cb_edit:
                 self._cb_edit(updated)
-        EditDialog(self, item, _save)
+        EditDialog(self, item, _save,
+                   on_capture_start=self._cb_capture_start,
+                   on_capture_end=self._cb_capture_end)
 
     def _on_delete(self, item_id: int):
         if self._cb_delete:
@@ -669,7 +686,9 @@ class App(ctk.CTk):
         def _save(item_data: dict):
             if self._cb_add:
                 self._cb_add(item_data)
-        EditDialog(self, template, _save)
+        EditDialog(self, template, _save,
+                   on_capture_start=self._cb_capture_start,
+                   on_capture_end=self._cb_capture_end)
 
     # ── BGM プレイヤーコントロール ─────────────────────────────────────────
 

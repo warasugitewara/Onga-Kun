@@ -209,6 +209,22 @@ def main():
         player.set_monitor_device(device_name)
         save_settings(settings)
 
+    def on_capture_start():
+        """キーキャプチャ中はグローバルホットキーを一時停止して誤発火を防ぐ"""
+        global _hotkey_handles
+        for handle in _hotkey_handles:
+            try:
+                keyboard.remove_hotkey(handle)
+            except Exception:
+                pass
+        _hotkey_handles.clear()
+        print("[ホットキー] キャプチャ中 — 一時停止")
+
+    def on_capture_end():
+        """キーキャプチャ終了後にグローバルホットキーを再登録する"""
+        register_hotkeys(settings, player)
+        print("[ホットキー] キャプチャ終了 — 再登録")
+
     def on_effect(item_id: int):
         for item in settings.get("soundboard", []):
             if item["id"] == item_id:
@@ -310,6 +326,8 @@ def main():
         on_mic_volume=on_mic_volume,
         on_mic_monitor=on_mic_monitor,
         on_monitor_device=on_monitor_device,
+        on_capture_start=on_capture_start,
+        on_capture_end=on_capture_end,
     )
 
     # ── メインループ ────────────────────────────────────────────────────────
