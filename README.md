@@ -1,4 +1,4 @@
-# 音ガくん (Onga-Kun)
+# Onga-Kun
 
 Windows 向けのサウンドボード・BGM プレイヤーアプリです。  
 VB-Cable と組み合わせて Discord やゲーム中にマイク経由で効果音・BGM を流すことができます。
@@ -29,7 +29,7 @@ build.bat
 
 ## VB-Cable との連携方法
 
-1. 音ガくんの出力先デバイスを **CABLE Input (VB-Audio Virtual Cable)** に設定
+1. Onga-Kunの出力先デバイスを **CABLE Input (VB-Audio Virtual Cable)** に設定
 2. Discord 等のマイク入力を **CABLE Output (VB-Audio Virtual Cable)** に設定
 
 ## ライセンス
