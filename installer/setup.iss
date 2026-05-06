@@ -4,7 +4,7 @@
 
 #define MyAppName    "Onga-Kun"
 #define MyAppNameEn  "onga-kun"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "warasugitewara"
 #define MyAppURL     "https://github.com/warasugitewara/Onga-Kun"
 #define MyAppExe     "onga-kun.exe"
@@ -35,7 +35,7 @@ LZMAUseSeparateProcess=yes
 
 ; 見た目
 WizardStyle=modern
-; SetupIconFile=..\assets\icon.ico  ; ← icon.ico を assets/ に追加したら有効化
+SetupIconFile=..\assets\icon.ico
 
 ; 既存バージョンの上書きインストール対応
 CloseApplications=yes
@@ -57,9 +57,9 @@ Source: "..\settings.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
 ; スタートメニュー
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\assets\icon.ico"
 ; デスクトップ（ユーザーが選択可能）
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: desktopicon
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\assets\icon.ico"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "デスクトップにショートカットを作成する"; GroupDescription: "追加タスク:"

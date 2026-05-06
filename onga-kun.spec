@@ -20,6 +20,10 @@ datas += collect_data_files("_soundfile_data")
 if os.path.exists("settings.example.json"):
     datas += [("settings.example.json", ".")]
 
+# アイコンファイル
+if os.path.exists("assets/icon.ico"):
+    datas += [("assets/icon.ico", "assets")]
+
 # ── Analysis ─────────────────────────────────────────────────────────────
 a = Analysis(
     ["main.py"],
@@ -40,6 +44,7 @@ a = Analysis(
         "cffi",
         "_cffi_backend",
         "winreg",        # startup.py で使用
+        "psutil",        # パフォーマンスモニター
     ],
     hookspath=[],
     runtime_hooks=[],
@@ -64,7 +69,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,          # コンソールウィンドウを出さない
-    # icon="assets/icon.ico",  # ← アイコンを用意したら有効化
+    icon="assets/icon.ico", # アプリアイコン
 )
 
 coll = COLLECT(

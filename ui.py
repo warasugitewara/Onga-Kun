@@ -159,7 +159,7 @@ class EditDialog(ctk.CTkToplevel):
                  on_capture_start: Callable = None, on_capture_end: Callable = None):
         super().__init__(parent)
         self.title("効果音を編集")
-        self.geometry("460x360")
+        self.geometry("460x440")
         self.resizable(False, False)
         self.configure(fg_color=SURFACE)
         self.grab_set()
@@ -190,11 +190,11 @@ class EditDialog(ctk.CTkToplevel):
         self.file_ent.pack(side="left")
         ctk.CTkButton(row, text="…", width=52, command=self._browse).pack(side="left", padx=(6, 0))
 
+        # ── 再生ホットキー ──────────────────────────────────────────────────
         ctk.CTkLabel(
-            self, text="ホットキー", font=ctk.CTkFont(size=11), text_color=TEXT_SUB
+            self, text="再生ホットキー", font=ctk.CTkFont(size=11), text_color=TEXT_SUB
         ).pack(anchor="w", padx=24, pady=(8, 2))
 
-        # キャプチャ状態
         self._hotkey_val: str = item.get("hotkey", "")
         self._capturing: bool = False
         self._held_keys: set  = set()
@@ -221,6 +221,38 @@ class EditDialog(ctk.CTkToplevel):
             command=self._clear_hotkey,
         ).pack(side="left", padx=(4, 0))
 
+        # ── 停止ホットキー ──────────────────────────────────────────────────
+        ctk.CTkLabel(
+            self, text="停止ホットキー（この音だけを止めるキー）",
+            font=ctk.CTkFont(size=11), text_color=TEXT_SUB
+        ).pack(anchor="w", padx=24, pady=(8, 2))
+
+        self._stop_hotkey_val: str = item.get("stop_hotkey", "")
+        self._stop_capturing: bool = False
+        self._stop_held_keys: set  = set()
+        self._stop_kb_hook         = None
+
+        stop_row = ctk.CTkFrame(self, fg_color="transparent")
+        stop_row.pack(fill="x", padx=24, pady=5)
+        self.stop_key_lbl = ctk.CTkLabel(
+            stop_row,
+            text=self._stop_hotkey_val if self._stop_hotkey_val else "未設定",
+            width=190, anchor="w",
+            fg_color="#2b2b3a", corner_radius=6,
+            text_color=TEXT if self._stop_hotkey_val else TEXT_SUB,
+        )
+        self.stop_key_lbl.pack(side="left", ipadx=8, ipady=4)
+        self.stop_key_btn = ctk.CTkButton(
+            stop_row, text="🎹 クリックして設定", width=152,
+            command=self._start_stop_capture,
+        )
+        self.stop_key_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            stop_row, text="✕", width=32,
+            fg_color="#3a3a4a", hover_color="#4a4a5a",
+            command=self._clear_stop_hotkey,
+        ).pack(side="left", padx=(4, 0))
+
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         # ── 音量スライダー ───────────────────────────────────────────────────
@@ -244,7 +276,7 @@ class EditDialog(ctk.CTkToplevel):
         self._vol_label.pack(side="left", padx=(8, 0))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(pady=16)
+        btn_row.pack(pady=12)
         ctk.CTkButton(btn_row, text="保存", width=130, command=self._save).pack(side="left", padx=6)
         ctk.CTkButton(
             btn_row, text="キャンセル", width=130,
@@ -261,7 +293,7 @@ class EditDialog(ctk.CTkToplevel):
             self.file_ent.delete(0, "end")
             self.file_ent.insert(0, path)
 
-    # ── キーキャプチャ ──────────────────────────────────────────────────────
+    # ── 再生ホットキーキャプチャ ──────────────────────────────────────────────
 
     def _start_capture(self):
         if self._capturing:
@@ -270,7 +302,6 @@ class EditDialog(ctk.CTkToplevel):
         self._held_keys = set()
         self.key_lbl.configure(text="⌨ キーを押してください… (ESC でキャンセル)", text_color=TEXT_SUB)
         self.key_btn.configure(text="待機中…", fg_color=RED_BTN, state="disabled")
-        # キャプチャ中はグローバルホットキーを一時無効化して誤発火を防ぐ
         if self._on_capture_start:
             self._on_capture_start()
         self._kb_hook = keyboard.hook(self._on_key_event, suppress=False)
@@ -329,43 +360,116 @@ class EditDialog(ctk.CTkToplevel):
                 pass
             self._kb_hook = None
 
+    # ── 停止ホットキーキャプチャ ──────────────────────────────────────────────
+
+    def _start_stop_capture(self):
+        if self._stop_capturing:
+            return
+        self._stop_capturing = True
+        self._stop_held_keys = set()
+        self.stop_key_lbl.configure(text="⌨ キーを押してください… (ESC でキャンセル)", text_color=TEXT_SUB)
+        self.stop_key_btn.configure(text="待機中…", fg_color=RED_BTN, state="disabled")
+        if self._on_capture_start:
+            self._on_capture_start()
+        self._stop_kb_hook = keyboard.hook(self._on_stop_key_event, suppress=False)
+
+    def _on_stop_key_event(self, event):
+        if not self._stop_capturing:
+            return
+        name = (event.name or "").lower()
+        if event.event_type == keyboard.KEY_DOWN:
+            if name == "esc":
+                self._stop_capturing = False
+                self.after(0, self._cancel_stop_capture_ui)
+                return
+            self._stop_held_keys.add(name)
+        elif event.event_type == keyboard.KEY_UP:
+            if self._stop_held_keys:
+                combo = _build_hotkey_string(self._stop_held_keys)
+                self._stop_capturing = False
+                self.after(0, lambda c=combo: self._finish_stop_capture(c))
+
+    def _cancel_stop_capture_ui(self):
+        self._unhook_stop_kb()
+        self._stop_held_keys.clear()
+        self._reset_stop_btn()
+        if self._on_capture_end:
+            self._on_capture_end()
+
+    def _finish_stop_capture(self, combo: str):
+        self._unhook_stop_kb()
+        self._stop_hotkey_val = combo
+        self.stop_key_lbl.configure(text=combo, text_color=TEXT)
+        self._reset_stop_btn()
+        if self._on_capture_end:
+            self._on_capture_end()
+
+    def _reset_stop_btn(self):
+        if not self._stop_hotkey_val:
+            self.stop_key_lbl.configure(text="未設定", text_color=TEXT_SUB)
+        self.stop_key_btn.configure(
+            text="🎹 クリックして設定",
+            fg_color=("#3B8ED0", "#1F6AA5"),
+            state="normal",
+        )
+
+    def _clear_stop_hotkey(self):
+        if self._stop_capturing:
+            return
+        self._stop_hotkey_val = ""
+        self.stop_key_lbl.configure(text="未設定", text_color=TEXT_SUB)
+
+    def _unhook_stop_kb(self):
+        if self._stop_kb_hook is not None:
+            try:
+                keyboard.unhook(self._stop_kb_hook)
+            except Exception:
+                pass
+            self._stop_kb_hook = None
+
     def destroy(self):
         self._unhook_kb()
+        self._unhook_stop_kb()
         self._capturing = False
+        self._stop_capturing = False
         super().destroy()
 
     def _save(self):
         name = self.name_ent.get().strip()
-        self._item["name"]   = name if name else self._item["name"]
-        self._item["file"]   = self.file_ent.get().strip()
-        self._item["hotkey"] = self._hotkey_val
-        self._item["volume"] = int(self.vol_slider.get())
+        self._item["name"]        = name if name else self._item["name"]
+        self._item["file"]        = self.file_ent.get().strip()
+        self._item["hotkey"]      = self._hotkey_val
+        self._item["stop_hotkey"] = self._stop_hotkey_val
+        self._item["volume"]      = int(self.vol_slider.get())
         self._on_save(self._item)
         self.destroy()
 
 
 # ── 設定ダイアログ ─────────────────────────────────────────────────────────
 class SettingsDialog(ctk.CTkToplevel):
-    """アプリ設定ダイアログ（自動起動 ON/OFF + 全停止ホットキー設定）"""
+    """アプリ設定ダイアログ（自動起動 ON/OFF + 全停止ホットキー + パフォーマンス表示）"""
 
     def __init__(
         self, parent, *,
         startup_enabled: bool,
         stop_hotkey: str = "",
+        show_perf: bool = False,
         on_startup_change: Optional[Callable[[bool], None]] = None,
         on_stop_hotkey_change: Optional[Callable[[str], None]] = None,
         on_capture_start: Optional[Callable[[], None]] = None,
         on_capture_end:   Optional[Callable[[], None]] = None,
+        on_perf_change:   Optional[Callable[[bool], None]] = None,
     ):
         super().__init__(parent)
         self.title("設定")
-        self.geometry("420x320")
+        self.geometry("420x400")
         self.resizable(False, False)
         self.configure(fg_color=BG)
         self._on_startup_change      = on_startup_change
         self._on_stop_hotkey_change  = on_stop_hotkey_change
         self._on_capture_start       = on_capture_start
         self._on_capture_end         = on_capture_end
+        self._on_perf_change         = on_perf_change
         self._stop_hotkey_val: str   = stop_hotkey
         self._capturing: bool        = False
         self._held_keys: set         = set()
@@ -429,6 +533,30 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._clear_hk,
         ).pack(side="left", padx=(4, 0))
 
+        ctk.CTkFrame(self, height=1, fg_color=BORDER).pack(fill="x", padx=20)
+
+        # パフォーマンス表示 row
+        perf_row = ctk.CTkFrame(self, fg_color="transparent")
+        perf_row.pack(fill="x", padx=24, pady=14)
+
+        perf_col = ctk.CTkFrame(perf_row, fg_color="transparent")
+        perf_col.pack(side="left")
+        ctk.CTkLabel(
+            perf_col, text="CPU・メモリ使用量を表示",
+            font=ctk.CTkFont(size=13), text_color=TEXT,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            perf_col, text="アクションバーにリアルタイム表示します",
+            font=ctk.CTkFont(size=11), text_color=TEXT_SUB,
+        ).pack(anchor="w", pady=(2, 0))
+
+        self._perf_sw = ctk.CTkSwitch(perf_row, text="", width=46, command=self._on_perf_toggle)
+        self._perf_sw.pack(side="right")
+        if show_perf:
+            self._perf_sw.select()
+        else:
+            self._perf_sw.deselect()
+
         ctk.CTkButton(
             self, text="閉じる", width=110,
             fg_color=BORDER, hover_color="#3e4160",
@@ -451,6 +579,10 @@ class SettingsDialog(ctk.CTkToplevel):
     def _on_toggle(self):
         if self._on_startup_change:
             self._on_startup_change(self._startup_sw.get() == 1)
+
+    def _on_perf_toggle(self):
+        if self._on_perf_change:
+            self._on_perf_change(self._perf_sw.get() == 1)
 
     # ── 全停止ホットキーキャプチャ ──────────────────────────────────────────
 
@@ -538,6 +670,16 @@ class App(ctk.CTk):
         self.minsize(800, 520)
         self.configure(fg_color=BG)
 
+        # アプリアイコンを設定
+        try:
+            import os, sys
+            _base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            _icon = os.path.join(_base, "assets", "icon.ico")
+            if os.path.exists(_icon):
+                self.iconbitmap(_icon)
+        except Exception:
+            pass
+
         # コールバック格納（main.py から set_callbacks() で注入）
         self._cb_play:       Optional[Callable[[str], None]] = None
         self._cb_pause:      Optional[Callable[[], None]]    = None
@@ -560,9 +702,11 @@ class App(ctk.CTk):
         self._cb_startup_change: Optional[Callable[[bool], None]] = None
         self._cb_stop_hotkey_change: Optional[Callable[[str], None]] = None
         self._cb_get_peak: Optional[Callable[[], float]] = None
+        self._cb_perf_change: Optional[Callable[[bool], None]] = None
 
         self._startup_enabled = False  # 現在のスタートアップ状態
         self._stop_hotkey: str = ""
+        self._show_perf: bool  = False
 
         self._music_file = ""
         self._all_items: list[dict] = []
@@ -659,6 +803,13 @@ class App(ctk.CTk):
             bar, text="＋  サウンドを追加", width=148,
             command=self._on_add,
         ).pack(side="left")
+
+        # 右端にパフォーマンスラベル（非表示時は空文字）
+        self._perf_lbl = ctk.CTkLabel(
+            bar, text="", text_color=TEXT_SUB,
+            font=ctk.CTkFont(size=10),
+        )
+        self._perf_lbl.pack(side="right", padx=(0, 12))
 
         # 右端にVUメーター
         ctk.CTkLabel(bar, text="OUT", text_color=TEXT_SUB, font=ctk.CTkFont(size=10)).pack(side="right", padx=(0, 8))
@@ -771,6 +922,7 @@ class App(ctk.CTk):
         on_startup_change=None,
         on_stop_hotkey_change=None,
         get_peak=None,
+        on_perf_change=None,
     ):
         self._cb_play               = on_play
         self._cb_pause              = on_pause
@@ -792,6 +944,7 @@ class App(ctk.CTk):
         self._cb_startup_change     = on_startup_change
         self._cb_stop_hotkey_change = on_stop_hotkey_change
         self._cb_get_peak           = get_peak
+        self._cb_perf_change        = on_perf_change
 
     def set_startup_state(self, enabled: bool):
         """スタートアップ状態を UI に反映します（設定ダイアログ用）。"""
@@ -818,6 +971,15 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+    def set_perf_enabled(self, enabled: bool):
+        """パフォーマンス表示を ON/OFF します（外部から初期値を設定する際に使用）。"""
+        self._show_perf = enabled
+        if not enabled:
+            try:
+                self._perf_lbl.configure(text="")
+            except Exception:
+                pass
+
     def _poll_vu(self):
         """VU メーターを約 80ms ごとに更新します。"""
         try:
@@ -830,15 +992,32 @@ class App(ctk.CTk):
             pass
         self.after(80, self._poll_vu)
 
+    def _poll_perf(self):
+        """CPU・メモリ使用量を 1 秒ごとに更新します。"""
+        if not self._show_perf:
+            return
+        try:
+            import psutil, os
+            proc  = psutil.Process(os.getpid())
+            cpu   = psutil.cpu_percent()
+            mem   = proc.memory_info().rss / 1024 / 1024  # MB
+            self._perf_lbl.configure(text=f"CPU {cpu:.1f}%  MEM {mem:.0f}MB")
+        except Exception:
+            pass
+        if self._show_perf:
+            self.after(1000, self._poll_perf)
+
     def _open_settings(self):
         SettingsDialog(
             self,
             startup_enabled=self._startup_enabled,
             stop_hotkey=self._stop_hotkey,
+            show_perf=self._show_perf,
             on_startup_change=self._on_startup_change,
             on_stop_hotkey_change=self._on_stop_hotkey_change,
             on_capture_start=self._cb_capture_start,
             on_capture_end=self._cb_capture_end,
+            on_perf_change=self._on_perf_change,
         )
 
     def set_devices(self, devices: list[str], current: str = ""):
@@ -856,6 +1035,18 @@ class App(ctk.CTk):
         self._stop_hotkey = hotkey
         if self._cb_stop_hotkey_change:
             self._cb_stop_hotkey_change(hotkey)
+
+    def _on_perf_change(self, enabled: bool):
+        self._show_perf = enabled
+        if not enabled:
+            try:
+                self._perf_lbl.configure(text="")
+            except Exception:
+                pass
+        else:
+            self.after(0, self._poll_perf)
+        if self._cb_perf_change:
+            self._cb_perf_change(enabled)
 
     def set_volume(self, volume: int):
         self.vol_slider.set(volume)

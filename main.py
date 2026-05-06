@@ -35,13 +35,18 @@ def load_settings() -> dict:
         "mic_input_device": "", "mic_volume": 80,
         "monitor_device": "",
         "stop_hotkey": "",
+        "show_perf": False,
         "soundboard": [],
     }
     if not os.path.exists(SETTINGS_PATH):
         return default
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            loaded = json.load(f)
+            # 古い settings.json にないキーをデフォルト値で補完
+            for k, v in default.items():
+                loaded.setdefault(k, v)
+            return loaded
     except (json.JSONDecodeError, OSError):
         return default
 
@@ -96,6 +101,25 @@ def register_hotkeys(settings: dict, player: AudioPlayer, app=None) -> None:
         )
         _hotkey_handles.append(handle)
         count += 1
+
+    # per-sound 停止ホットキー
+    for item in settings.get("soundboard", []):
+        stop_hk = item.get("stop_hotkey", "").strip()
+        item_id = item.get("id")
+        if not stop_hk or item_id is None:
+            continue
+        def _make_stop(iid):
+            def _stop():
+                player.stop_effect_by_id(iid)
+                if app:
+                    app.after(0, lambda: app.set_effect_playing(iid, False))
+            return _stop
+        try:
+            handle = keyboard.add_hotkey(stop_hk, _make_stop(item_id), suppress=False)
+            _hotkey_handles.append(handle)
+            count += 1
+        except Exception as e:
+            print(f"[警告] 停止ホットキー登録失敗 id={item_id}: {e}")
 
     # 全停止ホットキー
     stop_hk = settings.get("stop_hotkey", "").strip()
@@ -361,6 +385,12 @@ def main():
         register_hotkeys(settings, player, app)
         save_settings(settings)
 
+    def on_perf_change(enabled: bool):
+        """パフォーマンス表示の ON/OFF を設定に保存する"""
+        settings["show_perf"] = enabled
+        app.set_perf_enabled(enabled)
+        save_settings(settings)
+
     # ── コールバック注入 ────────────────────────────────────────────────────
     app.set_callbacks(
         on_play=on_play,
@@ -383,7 +413,11 @@ def main():
         on_startup_change=on_startup_change,
         on_stop_hotkey_change=on_stop_hotkey_change,
         get_peak=player.get_peak,
+        on_perf_change=on_perf_change,
     )
+
+    # パフォーマンス表示の初期状態を UI に反映
+    app.set_perf_enabled(settings.get("show_perf", False))
 
     # ── メインループ ────────────────────────────────────────────────────────
     try:
