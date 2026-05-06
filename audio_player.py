@@ -188,14 +188,23 @@ class _EffectPlayer:
     1 つの効果音を別スレッドで再生するクラス。
     チャンク書き込みループで stop() を確認することで即時停止をサポートする。
     """
-    _CHUNK = 2048
+    # 8192 サンプル (@48kHz ≈ 170ms) — ゲーム高負荷時のスケジューリング遅延への耐性を高める
+    _CHUNK = 8192
 
-    def __init__(self, out_idx: Optional[int], data: np.ndarray, samplerate: int):
+    def __init__(
+        self,
+        out_idx: Optional[int],
+        data: np.ndarray,
+        samplerate: int,
+        on_finish: Optional[callable] = None,
+    ):
         self._out_idx    = out_idx
         self._data       = data        # shape (n, ch) float32
         self._samplerate = samplerate
         self._stop_evt   = threading.Event()
+        self._on_finish  = on_finish
         self._thread     = threading.Thread(target=self._run, daemon=True)
+        self.peak: float = 0.0  # 直近チャンクのピークレベル（0.0–1.0）
 
     def start(self) -> None:
         self._thread.start()
@@ -215,10 +224,19 @@ class _EffectPlayer:
                 pos = 0
                 while pos < len(self._data) and not self._stop_evt.is_set():
                     chunk = self._data[pos : pos + self._CHUNK]
+                    if len(chunk) > 0:
+                        self.peak = float(np.abs(chunk).max())
                     stream.write(chunk)
                     pos += self._CHUNK
         except Exception as e:
             print(f"[エラー] 効果音再生失敗: {e}")
+        finally:
+            self.peak = 0.0
+            if self._on_finish:
+                try:
+                    self._on_finish()
+                except Exception:
+                    pass
 
 
 # ── AudioPlayer ──────────────────────────────────────────────────────────────
@@ -240,10 +258,19 @@ class AudioPlayer:
         self._bgm_pause = threading.Event()
         self._bgm_thread: Optional[threading.Thread] = None
         self._bgm_state = "stopped"   # "playing" | "paused" | "stopped"
+        self._bgm_peak: float = 0.0   # BGM の直近ピーク
 
-        # 効果音
+        # 効果音（アイテム ID → メインプレイヤー）
         self._eff_lock    = threading.Lock()
-        self._eff_players: list[_EffectPlayer] = []
+        self._active_by_id: dict[int, _EffectPlayer] = {}
+        self._monitor_players: list[_EffectPlayer]   = []  # モニター用（fire-and-forget）
+
+        # デコード済みオーディオのキャッシュ（ファイルパス → (data, samplerate)）
+        self._file_cache: dict[str, tuple[np.ndarray, int]] = {}
+
+        # 効果音の開始・終了を通知するコールバック（item_id を引数に取る）
+        self._on_effect_start: Optional[callable] = None
+        self._on_effect_end:   Optional[callable] = None
 
     # ── デバイス ──────────────────────────────────────────────────────────
 
@@ -349,7 +376,9 @@ class AudioPlayer:
                             np.interp(x_out, x_in, chunk[:, c]).astype(np.float32)
                             for c in range(chunk.shape[1])
                         ])
-                    stream.write(chunk * (self._volume / 100.0))
+                    scaled = chunk * (self._volume / 100.0)
+                    self._bgm_peak = float(np.abs(scaled).max()) if len(scaled) else 0.0
+                    stream.write(scaled)
 
     def _bgm_run_from_array(self, data: np.ndarray, file_sr: int, chunk_size: int) -> None:
         """ndarray から再生（ffmpeg で事前デコード済みデータ用）。"""
@@ -365,6 +394,7 @@ class AudioPlayer:
                 if self._bgm_stop.is_set():
                     break
                 chunk = data[pos:pos + chunk_size] * (self._volume / 100.0)
+                self._bgm_peak = float(np.abs(chunk).max()) if len(chunk) else 0.0
                 stream.write(chunk.astype(np.float32))
                 pos += chunk_size
 
@@ -383,6 +413,7 @@ class AudioPlayer:
             self._bgm_thread.join(timeout=2.0)
         self._bgm_thread = None
         self._bgm_state  = "stopped"
+        self._bgm_peak   = 0.0
 
     def set_volume(self, volume: int) -> None:
         self._volume = max(0, min(100, volume))
@@ -390,45 +421,129 @@ class AudioPlayer:
     def get_music_state(self) -> str:
         return self._bgm_state
 
+    # ── コールバック設定 ──────────────────────────────────────────────────
+
+    def set_effect_callbacks(
+        self,
+        on_start: Optional[callable] = None,
+        on_end:   Optional[callable] = None,
+    ) -> None:
+        """効果音の開始・終了を通知するコールバックを登録します（引数: item_id: int）。"""
+        self._on_effect_start = on_start
+        self._on_effect_end   = on_end
+
     # ── 効果音（並列再生）────────────────────────────────────────────────
 
-    def play_effect(self, file_path: str, volume: Optional[int] = None) -> None:
-        """効果音を非同期・並列で再生します。WAV/FLAC/MP3/OGG/MP4/M4A に対応。"""
+    def play_effect(
+        self,
+        file_path: str,
+        item_id:   Optional[int] = None,
+        volume:    Optional[int] = None,
+    ) -> None:
+        """
+        効果音を再生します。
+
+        同じ item_id がすでに再生中の場合は停止して最初から再生し直します（重ね鳴り防止）。
+        デコード済みデータはキャッシュするため、2 回目以降は即座に再生が始まります。
+        """
         vol     = (volume if volume is not None else self._volume) / 100.0
         out_idx = self._out_idx
 
-        try:
-            raw, file_sr = read_audio_file(file_path)
-        except Exception as e:
-            print(f"[エラー] 効果音読み込み失敗: {e}")
-            return
+        # 同一アイテムが再生中なら停止してから再スタート（重ね鳴り防止）
+        if item_id is not None:
+            self._stop_effect_by_id_no_callback(item_id)
 
+        # デコード済みキャッシュを利用（ファイル I/O を省略して即再生）
+        if file_path not in self._file_cache:
+            try:
+                raw, file_sr = read_audio_file(file_path)
+                self._file_cache[file_path] = (raw, file_sr)
+            except Exception as e:
+                print(f"[エラー] 効果音読み込み失敗: {e}")
+                return
+
+        raw, file_sr = self._file_cache[file_path]
         data, out_sr = _to_device_format(raw, file_sr, out_idx)
         data = np.clip(data * vol, -1.0, 1.0).astype(np.float32)
 
         dev_name = sd.query_devices(out_idx)["name"] if out_idx is not None else "デフォルト"
-        print(f"[再生] {os.path.basename(file_path)}  vol={vol:.0%}  peak={float(np.abs(data).max()):.3f}  device=[{out_idx}]{dev_name}  sr={out_sr}")
+        print(
+            f"[再生] {os.path.basename(file_path)}"
+            f"  vol={vol:.0%}  peak={float(np.abs(data).max()):.3f}"
+            f"  device=[{out_idx}]{dev_name}  sr={out_sr}"
+        )
 
-        eps: list[_EffectPlayer] = [_EffectPlayer(out_idx, data, out_sr)]
+        # 再生終了時のクリーンアップ（再スタート時は発火しない）
+        ep_ref: list[_EffectPlayer] = []  # forward reference
 
-        # 自己モニター：メインデバイスと異なる場合のみ同時再生
-        mon_idx = self._monitor_idx
-        if mon_idx is not None and mon_idx != out_idx:
-            mon_data, mon_sr = _to_device_format(raw, file_sr, mon_idx)
-            mon_data = np.clip(mon_data * vol, -1.0, 1.0).astype(np.float32)
-            eps.append(_EffectPlayer(mon_idx, mon_data, mon_sr))
+        def _on_finish():
+            fire = False
+            with self._eff_lock:
+                if item_id is not None and self._active_by_id.get(item_id) is ep_ref[0]:
+                    del self._active_by_id[item_id]
+                    fire = True
+            if fire and self._on_effect_end:
+                self._on_effect_end(item_id)
+
+        ep_main = _EffectPlayer(out_idx, data, out_sr, on_finish=_on_finish if item_id is not None else None)
+        ep_ref.append(ep_main)
 
         with self._eff_lock:
-            self._eff_players = [p for p in self._eff_players if p.is_alive()]
-            self._eff_players.extend(eps)
-        for ep in eps:
-            ep.start()
+            # モニター（手元確認用）
+            mon_idx = self._monitor_idx
+            if mon_idx is not None and mon_idx != out_idx:
+                mon_data, mon_sr = _to_device_format(raw, file_sr, mon_idx)
+                mon_data = np.clip(mon_data * vol, -1.0, 1.0).astype(np.float32)
+                mon_ep = _EffectPlayer(mon_idx, mon_data, mon_sr)
+                self._monitor_players = [p for p in self._monitor_players if p.is_alive()]
+                self._monitor_players.append(mon_ep)
+                mon_ep.start()
+
+            if item_id is not None:
+                self._active_by_id[item_id] = ep_main
+
+        ep_main.start()
+
+        if item_id is not None and self._on_effect_start:
+            self._on_effect_start(item_id)
+
+    def _stop_effect_by_id_no_callback(self, item_id: int) -> None:
+        """item_id の再生を停止します。終了コールバックは発火しません（再スタート用）。"""
+        with self._eff_lock:
+            ep = self._active_by_id.pop(item_id, None)
+        if ep:
+            ep.stop()
+
+    def stop_effect_by_id(self, item_id: int) -> None:
+        """item_id の再生を停止し、終了コールバックを発火します。"""
+        with self._eff_lock:
+            ep = self._active_by_id.pop(item_id, None)
+        if ep:
+            ep.stop()
+            if self._on_effect_end:
+                self._on_effect_end(item_id)
 
     def stop_all_effects(self) -> None:
+        """再生中の効果音をすべて停止し、各アイテムの終了コールバックを発火します。"""
         with self._eff_lock:
-            for ep in self._eff_players:
-                ep.stop()
-            self._eff_players.clear()
+            items  = list(self._active_by_id.items())
+            mons   = list(self._monitor_players)
+            self._active_by_id.clear()
+            self._monitor_players.clear()
+
+        for item_id, ep in items:
+            ep.stop()
+            if self._on_effect_end:
+                self._on_effect_end(item_id)
+        for ep in mons:
+            ep.stop()
+
+    def get_peak(self) -> float:
+        """現在再生中の効果音 + BGM のピークレベル（0.0–1.0）を返します。"""
+        with self._eff_lock:
+            eff_peaks = [ep.peak for ep in self._active_by_id.values() if ep.is_alive()]
+        all_peaks = eff_peaks + ([self._bgm_peak] if self._bgm_peak > 0 else [])
+        return max(all_peaks) if all_peaks else 0.0
 
     # ── 解放 ─────────────────────────────────────────────────────────────
 
@@ -441,4 +556,5 @@ class AudioPlayer:
             self.stop_all_effects()
         except Exception:
             pass
+        self._file_cache.clear()
 

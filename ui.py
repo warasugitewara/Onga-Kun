@@ -58,7 +58,7 @@ class SoundboardButton(ctk.CTkFrame):
         on_play: Callable, on_edit: Callable, on_delete: Callable, **kw
     ):
         super().__init__(
-            parent, width=148, height=88,
+            parent, width=148, height=96,
             corner_radius=10, fg_color=color, **kw
         )
         self.pack_propagate(False)
@@ -70,13 +70,14 @@ class SoundboardButton(ctk.CTkFrame):
         self._on_delete = on_delete
         self._base      = color
         self._hover     = _lighten(color)
+        self._playing   = False
 
         self.name_lbl = ctk.CTkLabel(
             self, text=item["name"],
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color="white", wraplength=130, justify="center",
         )
-        self.name_lbl.place(relx=0.5, rely=0.42, anchor="center")
+        self.name_lbl.place(relx=0.5, rely=0.38, anchor="center")
 
         hotkey = item.get("hotkey", "")
         self.key_lbl = ctk.CTkLabel(
@@ -85,9 +86,19 @@ class SoundboardButton(ctk.CTkFrame):
             font=ctk.CTkFont(size=10),
             text_color="#cccccc",
         )
-        self.key_lbl.place(relx=0.5, rely=0.78, anchor="center")
+        self.key_lbl.place(relx=0.5, rely=0.66, anchor="center")
 
-        for w in (self, self.name_lbl, self.key_lbl):
+        vol = item.get("volume")
+        vol_text = f"🔊 {vol}%" if vol is not None else ""
+        self.vol_lbl = ctk.CTkLabel(
+            self,
+            text=vol_text,
+            font=ctk.CTkFont(size=9),
+            text_color="#bbccbb",
+        )
+        self.vol_lbl.place(relx=0.5, rely=0.88, anchor="center")
+
+        for w in (self, self.name_lbl, self.key_lbl, self.vol_lbl):
             w.bind("<Button-1>", self._click)
             w.bind("<Button-3>", self._right_click)
             w.bind("<Enter>",    self._enter)
@@ -114,14 +125,30 @@ class SoundboardButton(ctk.CTkFrame):
         finally:
             m.grab_release()
 
-    def _enter(self, _e): self.configure(fg_color=self._hover)
-    def _leave(self, _e): self.configure(fg_color=self._base)
+    def _enter(self, _e):
+        if not self._playing:
+            self.configure(fg_color=self._hover)
+    def _leave(self, _e):
+        if not self._playing:
+            self.configure(fg_color=self._base)
+
+    def set_playing(self, playing: bool) -> None:
+        """再生中かどうかを視覚的に示す（緑の枠線）。"""
+        self._playing = playing
+        if playing:
+            self.configure(border_width=2, border_color="#00e676")
+            self.name_lbl.configure(text_color="#00e676")
+        else:
+            self.configure(border_width=0)
+            self.name_lbl.configure(text_color="white")
 
     def update_item(self, item: dict):
         self.item = item
         self.name_lbl.configure(text=item["name"])
         hotkey = item.get("hotkey", "")
         self.key_lbl.configure(text=f"[{hotkey}]" if hotkey else "─")
+        vol = item.get("volume")
+        self.vol_lbl.configure(text=f"🔊 {vol}%" if vol is not None else "")
 
 
 # ── 編集ダイアログ ─────────────────────────────────────────────────────────
@@ -132,7 +159,7 @@ class EditDialog(ctk.CTkToplevel):
                  on_capture_start: Callable = None, on_capture_end: Callable = None):
         super().__init__(parent)
         self.title("効果音を編集")
-        self.geometry("460x295")
+        self.geometry("460x360")
         self.resizable(False, False)
         self.configure(fg_color=SURFACE)
         self.grab_set()
@@ -195,6 +222,26 @@ class EditDialog(ctk.CTkToplevel):
         ).pack(side="left", padx=(4, 0))
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        # ── 音量スライダー ───────────────────────────────────────────────────
+        ctk.CTkLabel(
+            self, text="この音の音量", font=ctk.CTkFont(size=11), text_color=TEXT_SUB
+        ).pack(anchor="w", padx=24, pady=(8, 2))
+
+        vol_row = ctk.CTkFrame(self, fg_color="transparent")
+        vol_row.pack(fill="x", padx=24, pady=5)
+        initial_vol = item.get("volume", 80)
+        self._vol_label = ctk.CTkLabel(
+            vol_row, text=f"{initial_vol}%", width=40, anchor="e",
+            text_color=TEXT, font=ctk.CTkFont(size=12),
+        )
+        self.vol_slider = ctk.CTkSlider(
+            vol_row, from_=0, to=100, width=300,
+            command=lambda v: self._vol_label.configure(text=f"{int(v)}%"),
+        )
+        self.vol_slider.set(initial_vol)
+        self.vol_slider.pack(side="left")
+        self._vol_label.pack(side="left", padx=(8, 0))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(pady=16)
@@ -292,22 +339,37 @@ class EditDialog(ctk.CTkToplevel):
         self._item["name"]   = name if name else self._item["name"]
         self._item["file"]   = self.file_ent.get().strip()
         self._item["hotkey"] = self._hotkey_val
+        self._item["volume"] = int(self.vol_slider.get())
         self._on_save(self._item)
         self.destroy()
 
 
 # ── 設定ダイアログ ─────────────────────────────────────────────────────────
 class SettingsDialog(ctk.CTkToplevel):
-    """アプリ設定ダイアログ（現在: Windows 自動起動 ON/OFF）"""
+    """アプリ設定ダイアログ（自動起動 ON/OFF + 全停止ホットキー設定）"""
 
-    def __init__(self, parent, *, startup_enabled: bool,
-                 on_startup_change: Optional[Callable[[bool], None]] = None):
+    def __init__(
+        self, parent, *,
+        startup_enabled: bool,
+        stop_hotkey: str = "",
+        on_startup_change: Optional[Callable[[bool], None]] = None,
+        on_stop_hotkey_change: Optional[Callable[[str], None]] = None,
+        on_capture_start: Optional[Callable[[], None]] = None,
+        on_capture_end:   Optional[Callable[[], None]] = None,
+    ):
         super().__init__(parent)
         self.title("設定")
-        self.geometry("380x210")
+        self.geometry("420x320")
         self.resizable(False, False)
         self.configure(fg_color=BG)
-        self._on_startup_change = on_startup_change
+        self._on_startup_change      = on_startup_change
+        self._on_stop_hotkey_change  = on_stop_hotkey_change
+        self._on_capture_start       = on_capture_start
+        self._on_capture_end         = on_capture_end
+        self._stop_hotkey_val: str   = stop_hotkey
+        self._capturing: bool        = False
+        self._held_keys: set         = set()
+        self._kb_hook                = None
 
         ctk.CTkLabel(
             self, text="⚙  設定",
@@ -318,7 +380,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # 自動起動 row
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=24, pady=18)
+        row.pack(fill="x", padx=24, pady=14)
 
         col = ctk.CTkFrame(row, fg_color="transparent")
         col.pack(side="left")
@@ -338,12 +400,42 @@ class SettingsDialog(ctk.CTkToplevel):
         else:
             self._startup_sw.deselect()
 
+        ctk.CTkFrame(self, height=1, fg_color=BORDER).pack(fill="x", padx=20)
+
+        # 全停止ホットキー row
+        ctk.CTkLabel(
+            self, text="すべての効果音を止めるキー",
+            font=ctk.CTkFont(size=13), text_color=TEXT,
+        ).pack(anchor="w", padx=24, pady=(14, 4))
+
+        hk_row = ctk.CTkFrame(self, fg_color="transparent")
+        hk_row.pack(fill="x", padx=24, pady=(0, 10))
+        self._hk_lbl = ctk.CTkLabel(
+            hk_row,
+            text=self._stop_hotkey_val if self._stop_hotkey_val else "未設定",
+            width=190, anchor="w",
+            fg_color="#2b2b3a", corner_radius=6,
+            text_color=TEXT if self._stop_hotkey_val else TEXT_SUB,
+        )
+        self._hk_lbl.pack(side="left", ipadx=8, ipady=4)
+        self._hk_btn = ctk.CTkButton(
+            hk_row, text="🎹 クリックして設定", width=152,
+            command=self._start_capture,
+        )
+        self._hk_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            hk_row, text="✕", width=32,
+            fg_color="#3a3a4a", hover_color="#4a4a5a",
+            command=self._clear_hk,
+        ).pack(side="left", padx=(4, 0))
+
         ctk.CTkButton(
             self, text="閉じる", width=110,
             fg_color=BORDER, hover_color="#3e4160",
-            command=self.destroy,
+            command=self._close,
         ).pack(pady=(0, 20))
 
+        self.protocol("WM_DELETE_WINDOW", self._close)
         self.grab_set()
         self.lift()
         self.focus_force()
@@ -359,6 +451,82 @@ class SettingsDialog(ctk.CTkToplevel):
     def _on_toggle(self):
         if self._on_startup_change:
             self._on_startup_change(self._startup_sw.get() == 1)
+
+    # ── 全停止ホットキーキャプチャ ──────────────────────────────────────────
+
+    def _start_capture(self):
+        if self._capturing:
+            return
+        self._capturing = True
+        self._held_keys = set()
+        self._hk_lbl.configure(text="⌨ キーを押してください… (ESC でキャンセル)", text_color=TEXT_SUB)
+        self._hk_btn.configure(text="待機中…", fg_color=RED_BTN, state="disabled")
+        if self._on_capture_start:
+            self._on_capture_start()
+        self._kb_hook = keyboard.hook(self._on_key_event, suppress=False)
+
+    def _on_key_event(self, event):
+        if not self._capturing:
+            return
+        name = (event.name or "").lower()
+        if event.event_type == keyboard.KEY_DOWN:
+            if name == "esc":
+                self._capturing = False
+                self.after(0, self._cancel_capture_ui)
+                return
+            self._held_keys.add(name)
+        elif event.event_type == keyboard.KEY_UP:
+            if self._held_keys:
+                combo = _build_hotkey_string(self._held_keys)
+                self._capturing = False
+                self.after(0, lambda c=combo: self._finish_capture(c))
+
+    def _cancel_capture_ui(self):
+        self._unhook_kb()
+        self._held_keys.clear()
+        self._reset_btn()
+        if self._on_capture_end:
+            self._on_capture_end()
+
+    def _finish_capture(self, combo: str):
+        self._unhook_kb()
+        self._stop_hotkey_val = combo
+        self._hk_lbl.configure(text=combo, text_color=TEXT)
+        self._reset_btn()
+        if self._on_capture_end:
+            self._on_capture_end()
+        if self._on_stop_hotkey_change:
+            self._on_stop_hotkey_change(combo)
+
+    def _reset_btn(self):
+        if not self._stop_hotkey_val:
+            self._hk_lbl.configure(text="未設定", text_color=TEXT_SUB)
+        self._hk_btn.configure(
+            text="🎹 クリックして設定",
+            fg_color=("#3B8ED0", "#1F6AA5"),
+            state="normal",
+        )
+
+    def _clear_hk(self):
+        if self._capturing:
+            return
+        self._stop_hotkey_val = ""
+        self._hk_lbl.configure(text="未設定", text_color=TEXT_SUB)
+        if self._on_stop_hotkey_change:
+            self._on_stop_hotkey_change("")
+
+    def _unhook_kb(self):
+        if self._kb_hook is not None:
+            try:
+                keyboard.unhook(self._kb_hook)
+            except Exception:
+                pass
+            self._kb_hook = None
+
+    def _close(self):
+        self._unhook_kb()
+        self._capturing = False
+        self.destroy()
 
 
 # ── メインウィンドウ ────────────────────────────────────────────────────────
@@ -390,15 +558,20 @@ class App(ctk.CTk):
         self._cb_capture_start: Optional[Callable[[], None]] = None
         self._cb_capture_end:   Optional[Callable[[], None]] = None
         self._cb_startup_change: Optional[Callable[[bool], None]] = None
+        self._cb_stop_hotkey_change: Optional[Callable[[str], None]] = None
+        self._cb_get_peak: Optional[Callable[[], float]] = None
 
         self._startup_enabled = False  # 現在のスタートアップ状態
+        self._stop_hotkey: str = ""
 
         self._music_file = ""
         self._all_items: list[dict] = []
+        self._sound_buttons: dict[int, "SoundboardButton"] = {}  # item_id → button
         self._mic_active         = False
         self._mic_monitor_active = False
 
         self._build()
+        self.after(100, self._poll_vu)
 
     # ── UI構築 ─────────────────────────────────────────────────────────────
 
@@ -465,7 +638,7 @@ class App(ctk.CTk):
         ).pack(side="right", padx=(0, 4))
 
     def _build_main(self):
-        # アクションバー（検索・追加・全停止）
+        # アクションバー（検索・追加・全停止・VUメーター）
         bar = ctk.CTkFrame(self, fg_color=BG, height=46)
         bar.pack(fill="x", padx=16, pady=(8, 4))
         bar.pack_propagate(False)
@@ -486,6 +659,14 @@ class App(ctk.CTk):
             bar, text="＋  サウンドを追加", width=148,
             command=self._on_add,
         ).pack(side="left")
+
+        # 右端にVUメーター
+        ctk.CTkLabel(bar, text="OUT", text_color=TEXT_SUB, font=ctk.CTkFont(size=10)).pack(side="right", padx=(0, 8))
+        self.vu_bar = ctk.CTkProgressBar(bar, width=100, height=10, corner_radius=4)
+        self.vu_bar.set(0)
+        self.vu_bar.pack(side="right", padx=(0, 4))
+        ctk.CTkLabel(bar, text="🔈", text_color=TEXT_SUB, font=ctk.CTkFont(size=12)).pack(side="right", padx=(0, 4))
+        self._vu_peak: float = 0.0
 
         # スクロール可能なサウンドグリッド
         self.grid_frame = ctk.CTkScrollableFrame(self, fg_color=BG)
@@ -588,35 +769,76 @@ class App(ctk.CTk):
         on_mic_monitor=None, on_monitor_device=None,
         on_capture_start=None, on_capture_end=None,
         on_startup_change=None,
+        on_stop_hotkey_change=None,
+        get_peak=None,
     ):
-        self._cb_play           = on_play
-        self._cb_pause          = on_pause
-        self._cb_stop           = on_stop
-        self._cb_stop_all       = on_stop_all
-        self._cb_volume         = on_volume
-        self._cb_device         = on_device
-        self._cb_effect         = on_effect
-        self._cb_edit           = on_edit_sound
-        self._cb_delete         = on_delete_sound
-        self._cb_add            = on_add_sound
-        self._cb_mic_toggle     = on_mic_toggle
-        self._cb_mic_device     = on_mic_device
-        self._cb_mic_volume     = on_mic_volume
-        self._cb_mic_monitor    = on_mic_monitor
-        self._cb_monitor_device = on_monitor_device
-        self._cb_capture_start  = on_capture_start
-        self._cb_capture_end    = on_capture_end
-        self._cb_startup_change = on_startup_change
+        self._cb_play               = on_play
+        self._cb_pause              = on_pause
+        self._cb_stop               = on_stop
+        self._cb_stop_all           = on_stop_all
+        self._cb_volume             = on_volume
+        self._cb_device             = on_device
+        self._cb_effect             = on_effect
+        self._cb_edit               = on_edit_sound
+        self._cb_delete             = on_delete_sound
+        self._cb_add                = on_add_sound
+        self._cb_mic_toggle         = on_mic_toggle
+        self._cb_mic_device         = on_mic_device
+        self._cb_mic_volume         = on_mic_volume
+        self._cb_mic_monitor        = on_mic_monitor
+        self._cb_monitor_device     = on_monitor_device
+        self._cb_capture_start      = on_capture_start
+        self._cb_capture_end        = on_capture_end
+        self._cb_startup_change     = on_startup_change
+        self._cb_stop_hotkey_change = on_stop_hotkey_change
+        self._cb_get_peak           = get_peak
 
     def set_startup_state(self, enabled: bool):
         """スタートアップ状態を UI に反映します（設定ダイアログ用）。"""
         self._startup_enabled = enabled
 
+    def set_stop_hotkey(self, hotkey: str):
+        """全停止ホットキー文字列を UI に反映します（設定ダイアログ用）。"""
+        self._stop_hotkey = hotkey
+
+    def set_effect_playing(self, item_id: int, playing: bool):
+        """特定の効果音ボタンの再生中インジケーターを更新します。"""
+        btn = self._sound_buttons.get(item_id)
+        if btn:
+            try:
+                btn.set_playing(playing)
+            except Exception:
+                pass
+
+    def clear_all_playing(self):
+        """すべての効果音ボタンの再生中インジケーターを消します。"""
+        for btn in self._sound_buttons.values():
+            try:
+                btn.set_playing(False)
+            except Exception:
+                pass
+
+    def _poll_vu(self):
+        """VU メーターを約 80ms ごとに更新します。"""
+        try:
+            if self._cb_get_peak:
+                peak = self._cb_get_peak()
+                # 急速なピークアップ・緩やかな減衰
+                self._vu_peak = max(peak, self._vu_peak * 0.82)
+                self.vu_bar.set(min(self._vu_peak, 1.0))
+        except Exception:
+            pass
+        self.after(80, self._poll_vu)
+
     def _open_settings(self):
         SettingsDialog(
             self,
             startup_enabled=self._startup_enabled,
+            stop_hotkey=self._stop_hotkey,
             on_startup_change=self._on_startup_change,
+            on_stop_hotkey_change=self._on_stop_hotkey_change,
+            on_capture_start=self._cb_capture_start,
+            on_capture_end=self._cb_capture_end,
         )
 
     def set_devices(self, devices: list[str], current: str = ""):
@@ -629,6 +851,11 @@ class App(ctk.CTk):
         self._startup_enabled = enabled
         if self._cb_startup_change:
             self._cb_startup_change(enabled)
+
+    def _on_stop_hotkey_change(self, hotkey: str):
+        self._stop_hotkey = hotkey
+        if self._cb_stop_hotkey_change:
+            self._cb_stop_hotkey_change(hotkey)
 
     def set_volume(self, volume: int):
         self.vol_slider.set(volume)
@@ -696,6 +923,7 @@ class App(ctk.CTk):
         """items をグリッドに描画する（検索フィルタでも使用）"""
         for w in self.grid_frame.winfo_children():
             w.destroy()
+        self._sound_buttons.clear()
 
         cols = 5
         for i, item in enumerate(items):
@@ -707,6 +935,7 @@ class App(ctk.CTk):
                 on_delete=self._on_delete,
             )
             btn.grid(row=i // cols, column=i % cols, padx=6, pady=6, sticky="nsew")
+            self._sound_buttons[item["id"]] = btn
 
         for c in range(cols):
             self.grid_frame.grid_columnconfigure(c, weight=1)

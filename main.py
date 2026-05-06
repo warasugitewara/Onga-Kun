@@ -34,6 +34,7 @@ def load_settings() -> dict:
         "output_device": "", "volume": 50,
         "mic_input_device": "", "mic_volume": 80,
         "monitor_device": "",
+        "stop_hotkey": "",
         "soundboard": [],
     }
     if not os.path.exists(SETTINGS_PATH):
@@ -65,9 +66,9 @@ def _next_id(settings: dict) -> int:
 _hotkey_handles: list = []
 
 
-def register_hotkeys(settings: dict, player: AudioPlayer) -> None:
+def register_hotkeys(settings: dict, player: AudioPlayer, app=None) -> None:
     """
-    soundboard エントリのホットキーを一括登録します。
+    soundboard エントリのホットキーと全停止ホットキーを一括登録します。
     呼ぶ前に既存フックをすべて解除するので、設定変更後に再呼び出しするだけでOKです。
     ゲームなど他ウィンドウが前面でも検知できます（管理者権限推奨）。
     """
@@ -82,14 +83,34 @@ def register_hotkeys(settings: dict, player: AudioPlayer) -> None:
 
     count = 0
     for item in settings.get("soundboard", []):
-        hotkey = item.get("hotkey", "").strip()
-        file   = item.get("file",    "").strip()
+        hotkey  = item.get("hotkey", "").strip()
+        file    = item.get("file",    "").strip()
+        item_id = item.get("id")
+        vol     = item.get("volume")
         if not hotkey or not file or not os.path.exists(file):
             continue
-        # suppress=False → 他アプリへのキー入力はブロックしない
-        handle = keyboard.add_hotkey(hotkey, lambda f=file: player.play_effect(f), suppress=False)
+        handle = keyboard.add_hotkey(
+            hotkey,
+            lambda f=file, iid=item_id, v=vol: player.play_effect(f, item_id=iid, volume=v),
+            suppress=False,
+        )
         _hotkey_handles.append(handle)
         count += 1
+
+    # 全停止ホットキー
+    stop_hk = settings.get("stop_hotkey", "").strip()
+    if stop_hk:
+        def _stop_all_from_hotkey():
+            player.stop_all_effects()
+            if app:
+                app.after(0, app.clear_all_playing)
+        try:
+            handle = keyboard.add_hotkey(stop_hk, _stop_all_from_hotkey, suppress=False)
+            _hotkey_handles.append(handle)
+            count += 1
+        except Exception as e:
+            print(f"[警告] 全停止ホットキー登録失敗: {e}")
+
     print(f"[ホットキー] {count} 件登録")
 
 
@@ -129,11 +150,12 @@ def main():
     app.set_mic_volume(settings.get("mic_volume", 80))
     mic.set_volume(settings.get("mic_volume", 80))
     app.set_soundboard(settings.get("soundboard", []))
+    app.set_stop_hotkey(settings.get("stop_hotkey", ""))
 
     # スタートアップ状態をレジストリから読んで UI に反映
     app.set_startup_state(is_startup_enabled())
 
-    register_hotkeys(settings, player)
+    register_hotkeys(settings, player, app)
 
     # ── アップデートチェック（バックグラウンド、起動を妨げない）──────────────
     def _check_update():
@@ -205,6 +227,7 @@ def main():
     def on_stop_all():
         """サウンドボードで鳴らしている効果音をすべて停止（BGM は止めない）"""
         player.stop_all_effects()
+        app.after(0, app.clear_all_playing)
 
     def on_volume(volume: int):
         settings["volume"] = volume
@@ -232,31 +255,40 @@ def main():
 
     def on_capture_end():
         """キーキャプチャ終了後にグローバルホットキーを再登録する"""
-        register_hotkeys(settings, player)
+        register_hotkeys(settings, player, app)
         print("[ホットキー] キャプチャ終了 — 再登録")
 
     def on_effect(item_id: int):
         for item in settings.get("soundboard", []):
             if item["id"] == item_id:
                 file = item.get("file", "").strip()
+                vol  = item.get("volume")  # None → AudioPlayer のグローバル音量を使用
                 if file and os.path.exists(file):
-                    player.play_effect(file)
+                    player.play_effect(file, item_id=item_id, volume=vol)
                 else:
                     print(f"[警告] ファイル未設定または見つかりません id={item_id}")
                 return
+
+    def on_effect_start(item_id: int):
+        app.after(0, lambda: app.set_effect_playing(item_id, True))
+
+    def on_effect_end(item_id: int):
+        app.after(0, lambda: app.set_effect_playing(item_id, False))
+
+    player.set_effect_callbacks(on_effect_start, on_effect_end)
 
     def on_edit_sound(updated: dict):
         for i, item in enumerate(settings["soundboard"]):
             if item["id"] == updated["id"]:
                 settings["soundboard"][i] = updated
                 break
-        register_hotkeys(settings, player)
+        register_hotkeys(settings, player, app)
         app.update_sound_item(updated)
         save_settings(settings)
 
     def on_delete_sound(item_id: int):
         settings["soundboard"] = [it for it in settings["soundboard"] if it["id"] != item_id]
-        register_hotkeys(settings, player)
+        register_hotkeys(settings, player, app)
         app.remove_sound_item(item_id)
         save_settings(settings)
 
@@ -264,7 +296,7 @@ def main():
         """EditDialog から渡された item_data に ID を付与して追加する"""
         item_data["id"] = _next_id(settings)
         settings["soundboard"].append(item_data)
-        register_hotkeys(settings, player)
+        register_hotkeys(settings, player, app)
         app.add_sound_item(item_data)
         save_settings(settings)
 
@@ -323,6 +355,12 @@ def main():
         """Windows スタートアップへの登録 / 解除"""
         set_startup(enabled)
 
+    def on_stop_hotkey_change(hotkey: str):
+        """全停止ホットキーを更新して再登録する"""
+        settings["stop_hotkey"] = hotkey
+        register_hotkeys(settings, player, app)
+        save_settings(settings)
+
     # ── コールバック注入 ────────────────────────────────────────────────────
     app.set_callbacks(
         on_play=on_play,
@@ -343,6 +381,8 @@ def main():
         on_capture_start=on_capture_start,
         on_capture_end=on_capture_end,
         on_startup_change=on_startup_change,
+        on_stop_hotkey_change=on_stop_hotkey_change,
+        get_peak=player.get_peak,
     )
 
     # ── メインループ ────────────────────────────────────────────────────────
